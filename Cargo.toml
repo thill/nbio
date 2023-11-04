@@ -1,0 +1,17 @@
+[package]
+name = "nbio"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Eric Thill"]
+repository = "https://github.com/thill/nbio"
+description = "Non-Blocking I/O"
+keywords = ["tcp", "http", "nonblocking"]
+categories = ["rust-patterns"]
+exclude = ["Cargo.lock"]
+
+[dependencies]
+chunked_transfer = "1.4.1"
+http = "0.2.9"
+httparse = "1.8.0"
+tcp-stream = "0.26.1"
