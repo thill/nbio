@@ -62,7 +62,8 @@ where
         Self {
             session,
             framing_strategy,
-            write_buffer: GrowableCircleBuf::new(write_buffer_capacity),
+            write_buffer: GrowableCircleBuf::new(write_buffer_capacity)
+                .unwrap_or_else(|_| GrowableCircleBuf::new(usize::MAX / 2).unwrap()),
             read_buffer: Vec::new(),
             read_advance: 0,
         }
@@ -94,7 +95,7 @@ where
             WriteStatus::Success => write_buffer.len(),
             WriteStatus::Pending(pending) => write_buffer.len() - pending.len(),
         };
-        self.write_buffer.advance_read(wrote_len);
+        self.write_buffer.advance_read(wrote_len)?;
         Ok(wrote_len > 0)
     }
 

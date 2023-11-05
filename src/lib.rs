@@ -113,7 +113,6 @@
 use std::io::Error;
 
 use tcp_stream::TLSConfig;
-
 mod buf;
 
 pub mod frame;
