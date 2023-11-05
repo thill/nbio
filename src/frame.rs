@@ -153,6 +153,10 @@ where
     ) -> Result<(), std::io::Error> {
         self.session.to_tls(domain, config)
     }
+
+    fn is_handshake_complete(&self) -> Result<bool, Error> {
+        self.session.is_handshake_complete()
+    }
 }
 
 /// Serialize and deserialize frames using buffer slices.
@@ -178,7 +182,11 @@ pub trait FramingStrategy {
     ///
     /// This is used to determine if the buffer can be passed to the `deserialize_frame` function.
     /// This function is guaranteed to be called before `deserialize_frame(..)`.
-    /// The `deserialize_frame(..)` function will only be called if this function returns `Ok(true)`
+    /// The `deserialize_frame(..)` function will only be called if this function returns `Ok(true)`.
+    ///
+    /// This function is guaranteed to be called repeatedly with the same set of growing data until `Ok(true)` or an `Err` is returned.
+    /// This means that this function is able to cache any partially parsed frame information, as the next call to this function will
+    /// always be for the same frame.
     fn check_deserialize_frame(&mut self, data: &[u8], eof: bool) -> Result<bool, Error>;
 
     /// Deserializes the given buffer into a message frame, returning the deserialized frame and serialized frame length.

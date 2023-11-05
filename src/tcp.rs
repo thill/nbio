@@ -15,10 +15,15 @@ use crate::{ReadStatus, Session, TlsSession, WriteStatus};
 /// This implementation does not provide any framing guarantees.
 /// Buffers will be returned as they are read from the underlying sockets.
 /// Writes may be partially completed, with the remaining slice returned as [`WriteStatus::Pending`].
+///
+/// Once a client successfully connects, a plain TCP session can initiale a TLS handshake by calling [`TlsSession::to_tls`].
+/// The TLS handshake will be driven to completion by calling the [`Session::drive`] function.
+/// While a TLS handshake is in progress, calls to `read` and `write` will not be able to consume or produce data.
 pub struct StreamingTcpSession {
     read_buffer: Vec<u8>,
     stream: Option<TcpStream>,
     mid_handshake: Option<MidHandshakeTlsStream>,
+    tls_handshake_complete: bool,
     is_server_session: bool,
 }
 impl StreamingTcpSession {
@@ -37,6 +42,7 @@ impl StreamingTcpSession {
             stream: None,
             mid_handshake: None,
             read_buffer,
+            tls_handshake_complete: false,
             is_server_session: false,
         }
     }
@@ -174,6 +180,7 @@ impl Session for StreamingTcpSession {
             match mid_handshake.handshake() {
                 Ok(x) => {
                     self.stream = Some(x);
+                    self.tls_handshake_complete = true;
                     Ok(true)
                 }
                 Err(err) => match err {
@@ -279,6 +286,7 @@ impl TlsSession for StreamingTcpSession {
         match stream.into_tls(domain, config) {
             Ok(x) => {
                 self.stream = Some(x);
+                self.tls_handshake_complete = true;
                 Ok(())
             }
             Err(err) => match err {
@@ -289,6 +297,10 @@ impl TlsSession for StreamingTcpSession {
                 HandshakeError::Failure(err) => Err(err),
             },
         }
+    }
+
+    fn is_handshake_complete(&self) -> Result<bool, Error> {
+        Ok(self.tls_handshake_complete)
     }
 }
 

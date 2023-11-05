@@ -1,8 +1,8 @@
 //! # Description
 //!
-//! This crate aims to make bi-direction, nonblocking I/O easier to understand and reason about by introducing
-//! new patterns that extend beyond dealing directly with raw-bytes and partial I/O operations.
-//! As a result, all [`Session`] implementations provided by this crate are non-blocking by default.
+//! This crate aims to make bi-directional, nonblocking I/O easier to reason about by using patterns that extend beyond dealing directly
+//! with raw bytes, the [`std::io::Read`] and [`std::io::Write`] traits, and [`std::io::ErrorKind::WouldBlock`] errors.
+//! Since this crate's main focus is nonblocking I/O, all [`Session`] implementations provided by this crate are non-blocking by default.
 //!
 //! # Sessions
 //!
@@ -18,10 +18,11 @@
 //!
 //! # Errors
 //!
-//! The philosphy of this crate is that an [`Err`] should always represent a transport or protocol-level error.
-//! It should not be returned by a function as a condition that should be handled during **normal** data flow.
+//! The philosophy of this crate is that an [`Err`] should always represent a transport or protocol-level error.
+//! An [`Err`] should not be returned by a function as a condition that should be handled during **normal** branching logic.
 //! As a result, instead of forcing you to handle [`std::io::ErrorKind::WouldBlock`] everywhere you deal with nonblocking code,
-//! this crate will provide `None`/`Buffered`/`Pending` results as [`Ok`] [`ReadStatus`] or [`WriteStatus`] enums.
+//! this crate will indicate partial read/write operations using [`ReadStatus::None`], [`ReadStatus::Buffered`], and [`WriteStatus::Pending`]
+//! as [`Result::Ok`].
 //!
 //! # Non-Blocking Examples
 //!
@@ -87,10 +88,10 @@
 //! In fact, the `conn` returned by `client.request(..)` is simply a [`frame::FramingSession`] that utilizes a [`http::Http1FramingStrategy`].
 //!
 //! ```no_run
+//! use http::Request;
 //! use nbio::{Session, ReadStatus};
 //! use nbio::http::HttpClient;
-//! use nbio::hyperium_http::Request;
-//! use nbio::tcp_stream::OwnedTLSConfig;
+//! use tcp_stream::OwnedTLSConfig;
 //!
 //! // create the client and make the request
 //! let mut client = HttpClient::new(OwnedTLSConfig::default());
@@ -183,6 +184,9 @@ pub trait TlsSession: Session {
     /// Calls to `drive(..)`` will run the TLS handshake to completion.
     /// While the handshake is in progress, reads and writes will stall, reporting `Pending`/`None`.
     fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error>;
+
+    /// Check if the `to_tls` handshake is complete.
+    fn is_handshake_complete(&self) -> Result<bool, Error>;
 }
 
 /// Returned by the [`Session`] read function, providing the outcome or information about the read action.

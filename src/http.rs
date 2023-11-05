@@ -1,6 +1,7 @@
-//! A simple non-blocking HTTP 1.x client
+//! A non-blocking HTTP 1.x client
 use std::{
     io::{self, Error, ErrorKind, Read},
+    mem::swap,
     str::FromStr,
 };
 
@@ -134,11 +135,29 @@ impl IntoBody for () {
     }
 }
 
+enum BodyType {
+    ContentLength(usize),
+    ChunkedTransfer,
+    OnClose,
+    None,
+}
+
+struct BodyInfo {
+    offset: usize,
+    ty: BodyType,
+}
+impl BodyInfo {
+    pub fn new(offset: usize, ty: BodyType) -> Self {
+        Self { offset, ty }
+    }
+}
+
 /// A [`FramingStrategy`] for HTTP 1.x where [`FramingStrategy::WriteFrame`] is an [`http::Request`], and the [`FramingStrategy::ReadFrame`] is an [`http::Response`].
 pub struct Http1FramingStrategy {
     serialized_request: Vec<u8>,
     deserialized_response: hyperium_http::Response<Vec<u8>>,
     deserialized_size: usize,
+    body_info: Option<BodyInfo>,
 }
 impl Http1FramingStrategy {
     pub fn new() -> Self {
@@ -146,6 +165,7 @@ impl Http1FramingStrategy {
             serialized_request: Vec::new(),
             deserialized_response: hyperium_http::Response::new(Vec::new()),
             deserialized_size: 0,
+            body_info: None,
         }
     }
 }
@@ -158,61 +178,92 @@ impl FramingStrategy for Http1FramingStrategy {
         let mut headers = Vec::new();
         headers.resize(header_count, httparse::EMPTY_HEADER);
 
-        let mut resp: httparse::Response<'_, '_> = httparse::Response::new(&mut headers);
-        match resp.parse(data).map_err(|err| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("http response parse failed: {err:?}").as_str(),
-            )
-        })? {
-            httparse::Status::Complete(size) => {
-                if parse_is_chunked(&resp.headers) {
-                    // TODO: determine better way to see if all chunks have been received, deserializer does not support this
-                    if size < data.len() && ends_with_ascii(data, "\r\n\r\n") {
-                        let mut body = Vec::new();
-                        let mut decoder = chunked_transfer::Decoder::new(&data[size..]);
-                        decoder.read_to_end(&mut body)?;
-                        match decoder.remaining_chunks_size() {
-                            Some(_) => Ok(false),
-                            None => {
-                                parsed_into_response(resp, &body, &mut self.deserialized_response)?;
-                                Ok(true)
+        // if they have not already been parsed, attempt to parse the response headers and find the body type.
+        if self.body_info.is_none() {
+            let mut parsed = httparse::Response::new(&mut headers);
+            match parsed.parse(data).map_err(|err| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("http response parse failed: {err:?}").as_str(),
+                )
+            })? {
+                httparse::Status::Complete(size) => {
+                    // determine the body type
+                    if parse_is_chunked(&parsed.headers) {
+                        self.body_info = Some(BodyInfo::new(size, BodyType::ChunkedTransfer));
+                    } else if let Some(content_length) = parse_content_length(&parsed.headers)? {
+                        self.body_info =
+                            Some(BodyInfo::new(size, BodyType::ContentLength(content_length)));
+                    } else if parsed.version.is_none() || parsed.version == Some(1) {
+                        self.body_info = Some(BodyInfo::new(size, BodyType::OnClose));
+                    } else {
+                        self.body_info = Some(BodyInfo::new(size, BodyType::None));
+                    }
+                    // parse into cached deserialized_response
+                    parsed_into_response(parsed, &mut self.deserialized_response)?;
+                }
+                httparse::Status::Partial => return Ok(false),
+            }
+        }
+
+        // use parsed BodyInfo to check if entire body has been received
+        let parsed_body = match &self.body_info {
+            None => None,
+            Some(body_info) => {
+                match body_info.ty {
+                    BodyType::ChunkedTransfer => {
+                        // TODO: determine better way to see if all chunks have been received, deserializer does not support this
+                        // TODO: cache offset of last read chunk to avoid re-parsing entire body every time
+                        if body_info.offset < data.len() && ends_with_ascii(data, "\r\n\r\n") {
+                            let mut body = Vec::new();
+                            let mut decoder =
+                                chunked_transfer::Decoder::new(&data[body_info.offset..]);
+                            decoder.read_to_end(&mut body)?;
+                            match decoder.remaining_chunks_size() {
+                                None => Some(body),
+                                Some(_) => None,
                             }
+                        } else {
+                            None
                         }
-                    } else {
-                        Ok(false)
                     }
-                } else if let Some(content_length) = parse_content_length(&resp.headers)? {
-                    // read to given length
-                    let total_length = size + content_length;
-                    if data.len() < total_length {
-                        Ok(false)
-                    } else {
-                        parsed_into_response(
-                            resp,
-                            &data[size..total_length].to_vec(),
-                            &mut self.deserialized_response,
-                        )?;
-                        Ok(true)
+                    BodyType::ContentLength(content_length) => {
+                        // read to given length
+                        let total_length = body_info.offset + content_length;
+                        if data.len() >= total_length {
+                            Some(data[body_info.offset..total_length].to_vec())
+                        } else {
+                            None
+                        }
                     }
-                } else if eof {
-                    if resp.version.is_none() || resp.version == Some(1) {
-                        // eof, http 1.0, no content-length => must assume end of payload
-                        parsed_into_response(
-                            resp,
-                            &data[size..].to_vec(),
-                            &mut self.deserialized_response,
-                        )?;
-                        Ok(true)
-                    } else {
-                        // eof, not http 1.0 => erro
-                        Err(Error::new(ErrorKind::UnexpectedEof, "EOF"))
+                    BodyType::OnClose => {
+                        if eof {
+                            Some(data[body_info.offset..].to_vec())
+                        } else {
+                            None
+                        }
                     }
+                    BodyType::None => Some(Vec::new()),
+                }
+            }
+        };
+
+        // if entire body has been received, insert into deserialized_response and return true
+        match parsed_body {
+            None => {
+                if eof {
+                    Err(Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "http connection terminated before receiving full response",
+                    ))
                 } else {
                     Ok(false)
                 }
             }
-            httparse::Status::Partial => Ok(false),
+            Some(mut body) => {
+                swap(self.deserialized_response.body_mut(), &mut body);
+                Ok(true)
+            }
         }
     }
 
@@ -311,7 +362,6 @@ impl FramingStrategy for Http1FramingStrategy {
 
 fn parsed_into_response(
     parsed: httparse::Response,
-    body: &[u8],
     resp: &mut http::Response<Vec<u8>>,
 ) -> Result<(), Error> {
     // status code
@@ -353,9 +403,6 @@ fn parsed_into_response(
         })?;
         resp.headers_mut().insert(name, value);
     }
-    // body
-    resp.body_mut().clear();
-    resp.body_mut().extend_from_slice(body);
     Ok(())
 }
 
