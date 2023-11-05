@@ -262,6 +262,8 @@ impl FramingStrategy for Http1FramingStrategy {
             }
             Some(mut body) => {
                 swap(self.deserialized_response.body_mut(), &mut body);
+                // reset parsed body info for next response parsing iteration, allowing for use of keep-alive
+                self.body_info = None;
                 Ok(true)
             }
         }
