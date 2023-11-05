@@ -350,7 +350,13 @@ impl TcpServer {
 
     /// Accept a new TCP Session, immediately returning None in nonblocking mode if there are no new sessions.
     pub fn accept(&self) -> Result<Option<(StreamingTcpSession, SocketAddr)>, Error> {
-        let (stream, addr) = self.listener.accept()?;
+        let (stream, addr) = match self.listener.accept() {
+            Ok(v) => v,
+            Err(err) => match err.kind() {
+                ErrorKind::WouldBlock => return Ok(None),
+                _ => return Err(err),
+            },
+        };
         Ok(Some((
             StreamingTcpSession::default()
                 .with_stream(TcpStream::Plain(stream, true))
