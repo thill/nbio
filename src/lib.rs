@@ -174,6 +174,9 @@ pub trait Session {
 
     /// Flush all pending write data, blocking until completion.
     fn flush(&mut self) -> Result<(), Error>;
+
+    /// Close the session, causing all future calls to `drive`, `write`, and `read` to return `Err`.
+    fn close(&mut self) -> Result<(), Error>;
 }
 
 /// Optionally implemented for [`Session`] implementations that support TLS

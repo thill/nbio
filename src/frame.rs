@@ -102,6 +102,12 @@ where
         &mut self,
         frame: &'a Self::WriteData,
     ) -> Result<WriteStatus<'a, Self::WriteData>, Error> {
+        if !self.session.is_connected() {
+            return Err(Error::new(
+                ErrorKind::NotConnected,
+                "underlying session is not connected",
+            ));
+        }
         let data = self.framing_strategy.serialize_frame(&frame)?;
         if self.write_buffer.try_write(&data)? {
             Ok(WriteStatus::Success)
@@ -139,6 +145,10 @@ where
             self.drive()?;
         }
         self.session.flush()
+    }
+
+    fn close(&mut self) -> Result<(), Error> {
+        self.session.close()
     }
 }
 impl<S, F> TlsSession for FramingSession<S, F>

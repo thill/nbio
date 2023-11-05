@@ -270,6 +270,11 @@ impl Session for StreamingTcpSession {
             Some(stream) => stream.flush(),
         }
     }
+
+    fn close(&mut self) -> Result<(), Error> {
+        self.stream = None;
+        Ok(())
+    }
 }
 impl TlsSession for StreamingTcpSession {
     fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error> {
