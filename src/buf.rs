@@ -24,20 +24,10 @@ impl GrowableCircleBuf {
         self.circbuf.is_empty() && self.one_time_buffer.is_empty()
     }
 
-    /// return size of unread data
-    pub fn len(&self) -> usize {
-        if self.one_time_buffer.is_empty() {
-            self.circbuf.len()
-        } else {
-            self.one_time_buffer.len()
-        }
-    }
-
     /// return if data was written.
     /// data larger than the capacity will only write when the buffer is empty.
     pub fn try_write(&mut self, data: &Vec<&[u8]>) -> Result<bool, Error> {
         let total_data_len = data.iter().map(|x| x.len()).sum::<usize>();
-        if !self.is_empty() && total_data_len >= self.circbuf.len() - self.len() {}
 
         if total_data_len > self.circbuf.cap() {
             // data will never fit in circle buf, try to use one-time buffer
@@ -77,7 +67,7 @@ impl GrowableCircleBuf {
                 avail[0]
             }
         } else {
-            &self.one_time_buffer
+            &self.one_time_buffer[self.one_time_offset..]
         }
     }
 
@@ -87,11 +77,11 @@ impl GrowableCircleBuf {
             self.circbuf
                 .advance_read(size)
                 .map_err(|x| Error::new(ErrorKind::Other, x))
-        } else if size == self.one_time_buffer.len() {
+        } else if self.one_time_offset + size == self.one_time_buffer.len() {
             self.one_time_offset = 0;
             self.one_time_buffer = Vec::new();
             Ok(())
-        } else if size < self.one_time_buffer.len() {
+        } else if self.one_time_offset + size < self.one_time_buffer.len() {
             self.one_time_offset += size;
             Ok(())
         } else {
