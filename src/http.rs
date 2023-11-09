@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
 };
 
-use hyperium_http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING};
+use hyperium_http::header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
 use tcp_stream::OwnedTLSConfig;
 
 use crate::{
@@ -302,13 +302,7 @@ impl FramingStrategy for Http1FramingStrategy {
         };
 
         // calculate content-length
-        let (body, body_is_query) = if !request.body().is_empty() {
-            (request.body().as_slice(), false)
-        } else if let Some(query) = request.uri().query() {
-            (query.as_bytes(), true)
-        } else {
-            (request.body().as_slice(), false)
-        };
+        let body = request.body();
         let content_length = body.len().to_string();
 
         // construct HTTP/1.1 payload
@@ -318,6 +312,10 @@ impl FramingStrategy for Http1FramingStrategy {
         self.serialized_request.extend_from_slice(" ".as_bytes());
         self.serialized_request
             .extend_from_slice(request.uri().path().as_bytes());
+        if let Some(query) = request.uri().query() {
+            self.serialized_request.extend_from_slice("?".as_bytes());
+            self.serialized_request.extend_from_slice(query.as_bytes());
+        }
         self.serialized_request
             .extend_from_slice(format!(" {:?}", request.version()).as_bytes());
         self.serialized_request
@@ -331,12 +329,8 @@ impl FramingStrategy for Http1FramingStrategy {
             self.serialized_request
                 .extend_from_slice(LINE_BREAK.as_bytes());
         }
-        let mut found_content_type = false;
         for (n, v) in request.headers().iter() {
             // request headers
-            if n == CONTENT_TYPE {
-                found_content_type = true;
-            }
             self.serialized_request
                 .extend_from_slice(n.as_str().as_bytes());
             self.serialized_request.extend_from_slice(": ".as_bytes());
@@ -350,14 +344,6 @@ impl FramingStrategy for Http1FramingStrategy {
                     })?
                     .as_bytes(),
             );
-            self.serialized_request
-                .extend_from_slice(LINE_BREAK.as_bytes());
-        }
-        if !found_content_type && body_is_query {
-            self.serialized_request
-                .extend_from_slice(CONTENT_TYPE.as_str().as_bytes());
-            self.serialized_request
-                .extend_from_slice(": application/x-www-form-urlencoded".as_bytes());
             self.serialized_request
                 .extend_from_slice(LINE_BREAK.as_bytes());
         }
