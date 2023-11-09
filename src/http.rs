@@ -358,6 +358,8 @@ impl FramingStrategy for Http1FramingStrategy {
                 .extend_from_slice(CONTENT_TYPE.as_str().as_bytes());
             self.serialized_request
                 .extend_from_slice(": application/x-www-form-urlencoded".as_bytes());
+            self.serialized_request
+                .extend_from_slice(LINE_BREAK.as_bytes());
         }
         if body.len() > 0 {
             // content length header
