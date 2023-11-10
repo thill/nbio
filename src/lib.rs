@@ -113,15 +113,20 @@
 use std::io::Error;
 
 use tcp_stream::TLSConfig;
-mod buf;
 
 pub mod frame;
 
-pub extern crate tcp_stream;
-pub mod tcp;
-
-pub extern crate http as hyperium_http;
 pub mod http;
+pub extern crate http as hyperium_http;
+
+mod internal;
+
+pub mod mock;
+
+pub mod tcp;
+pub extern crate tcp_stream;
+
+pub mod util;
 
 /// A bi-directional connection supporting generic read and write events.
 ///

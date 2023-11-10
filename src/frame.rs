@@ -8,7 +8,7 @@ use std::{
     mem::swap,
 };
 
-use crate::{buf::GrowableCircleBuf, ReadStatus, Session, TlsSession, WriteStatus};
+use crate::{internal::GrowableCircleBuf, ReadStatus, Session, TlsSession, WriteStatus};
 
 /// # Framing Session
 ///
