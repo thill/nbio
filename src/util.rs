@@ -189,7 +189,7 @@ impl<S: Session> LivenessSession<S> {
             session,
             timeout,
             strategy,
-            liveness: SystemTime::now(),
+            liveness: SystemTime::now() + timeout,
         }
     }
 }
