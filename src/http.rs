@@ -401,10 +401,10 @@ fn parsed_into_response(
                 format!("response invalid header name '{}'", h.name).as_str(),
             )
         })?;
-        let value = http::HeaderValue::from_str(h.name).map_err(|_| {
+        let value = http::HeaderValue::from_bytes(h.value).map_err(|_| {
             Error::new(
                 ErrorKind::InvalidData,
-                format!("response invalid header name '{}'", h.name).as_str(),
+                format!("response invalid header value '{:?}'", h.value).as_str(),
             )
         })?;
         resp.headers_mut().insert(name, value);
@@ -513,6 +513,8 @@ mod test {
                 assert_eq!(r.status(), StatusCode::OK);
                 let body = String::from_utf8_lossy(r.body());
                 Ipv4Addr::from_str(body.trim()).expect("IP V4 address as body");
+                println!("{:?}", r.headers());
+                assert_eq!(r.headers()["Content-Type"], "text/plain");
                 break;
             }
         }
