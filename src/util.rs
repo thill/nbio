@@ -14,15 +14,10 @@ use crate::{ReadStatus, Session, TlsSession, WriteStatus};
 /// Heartbeats are produced with a call to a user-defined [`FnMut`], allowing the user to populate a heartbeat with sequences, timestamps, etc.
 /// Heartbeat messages are written on calls to `drive()` using an internal timestamp to schedule when to send heartbeats.
 ///
-/// The provided [`FnMut`] heartbeat populator should accept `&mut dyn Session` as input, allowing the function to optionally write a heartbeat directly to the underlying session.
-/// The session should return true if the next heartbeat is to be scheduled, or false if the
-pub struct HeartbeatingSession<S, F>
-where
-    S: Session,
-    F: FnMut(
-        &mut dyn Session<ReadData = S::ReadData, WriteData = S::WriteData>,
-    ) -> Result<HeartbeatResult, Error>,
-{
+/// The provided [`FnMut`] heartbeat populator should accept `&mut S` as input, where `S` is the underlying session type.
+/// The heartbeat populator allows the function to attempt to write a heartbeat directly to the underlying session.
+/// The session should return true if the next heartbeat is to be scheduled, or false otherwise.
+pub struct HeartbeatingSession<S, F> {
     session: S,
     interval: Duration,
     heartbeat_writer: F,
@@ -30,10 +25,8 @@ where
 }
 impl<S, F> HeartbeatingSession<S, F>
 where
-    S: Session,
-    F: FnMut(
-        &mut dyn Session<ReadData = S::ReadData, WriteData = S::WriteData>,
-    ) -> Result<HeartbeatResult, Error>,
+    S: Session + 'static,
+    F: for<'a> FnMut(&mut S) -> Result<HeartbeatResult, Error> + 'static,
 {
     /// Create a new `HeartbeatingSession`, using the given [`Session`], `interval`, and `heartbeat_writer`.
     pub fn new(session: S, interval: Duration, heartbeat_writer: F) -> Self {
@@ -55,13 +48,11 @@ where
 }
 impl<S, F> Session for HeartbeatingSession<S, F>
 where
-    S: Session,
-    F: FnMut(
-        &mut dyn Session<ReadData = S::ReadData, WriteData = S::WriteData>,
-    ) -> Result<HeartbeatResult, Error>,
+    S: Session + 'static,
+    F: for<'a> FnMut(&mut S) -> Result<HeartbeatResult, Error> + 'static,
 {
-    type ReadData = S::ReadData;
-    type WriteData = S::WriteData;
+    type ReadData<'a> = S::ReadData<'a>;
+    type WriteData<'a> = S::WriteData<'a>;
 
     fn is_connected(&self) -> bool {
         self.session.is_connected()
@@ -75,7 +66,7 @@ where
         let now = SystemTime::now();
         if now >= self.next_heartbeat {
             if let HeartbeatResult::Sent | HeartbeatResult::Skipped =
-                (self.heartbeat_writer)(&mut NoWriteSession::new(&mut self.session))?
+                (self.heartbeat_writer)(&mut self.session)?
             {
                 self.next_heartbeat = now + self.interval;
                 self.session.drive()?;
@@ -87,12 +78,12 @@ where
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData,
-    ) -> Result<crate::WriteStatus<'a, Self::WriteData>, std::io::Error> {
+        data: &'a Self::WriteData<'a>,
+    ) -> Result<crate::WriteStatus<'a, Self::WriteData<'a>>, std::io::Error> {
         self.session.write(data)
     }
 
-    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData>, std::io::Error> {
+    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData<'a>>, std::io::Error> {
         self.session.read()
     }
 
@@ -106,10 +97,8 @@ where
 }
 impl<S, F> TlsSession for HeartbeatingSession<S, F>
 where
-    S: TlsSession,
-    F: FnMut(
-        &mut dyn Session<ReadData = S::ReadData, WriteData = S::WriteData>,
-    ) -> Result<HeartbeatResult, Error>,
+    S: TlsSession + 'static,
+    F: for<'a> FnMut(&mut S) -> Result<HeartbeatResult, Error> + 'static,
 {
     fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error> {
         self.session.to_tls(domain, config)
@@ -131,66 +120,21 @@ pub enum HeartbeatResult {
     Failed,
 }
 
-/// Internal, used to ensure a user-provided function may not `read`.
-struct NoWriteSession<'s, S: Session> {
-    session: &'s mut S,
-}
-impl<'s, S: Session> NoWriteSession<'s, S> {
-    fn new(session: &'s mut S) -> Self {
-        Self { session }
-    }
-}
-impl<'s, S: Session> Session for NoWriteSession<'s, S> {
-    type ReadData = S::ReadData;
-    type WriteData = S::WriteData;
-
-    fn is_connected(&self) -> bool {
-        self.session.is_connected()
-    }
-
-    fn try_connect(&mut self) -> Result<bool, Error> {
-        self.session.try_connect()
-    }
-
-    fn drive(&mut self) -> Result<bool, Error> {
-        self.session.drive()
-    }
-
-    fn write<'a>(
-        &mut self,
-        data: &'a Self::WriteData,
-    ) -> Result<WriteStatus<'a, Self::WriteData>, Error> {
-        self.session.write(data)
-    }
-
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData>, Error> {
-        Err(Error::new(
-            ErrorKind::PermissionDenied,
-            "heartbeat function may not read",
-        ))
-    }
-
-    fn flush(&mut self) -> Result<(), Error> {
-        self.session.flush()
-    }
-
-    fn close(&mut self) -> Result<(), Error> {
-        self.session.close()
-    }
-}
-
 /// Encapsulates an underlying session, returning an error when a liveness check fails.
 ///
 /// A liveness timestamp is tracked internally and is reset based on the given [`LivenessStrategy`].
 ///
 /// When the configured duration elapses without liveness being reset, the `drive` function will return an `Err` or [`ErrorKind::TimedOut`].
-pub struct LivenessSession<S: Session> {
+pub struct LivenessSession<S> {
     session: S,
     timeout: Duration,
     strategy: LivenessStrategy,
     liveness: SystemTime,
 }
-impl<S: Session> LivenessSession<S> {
+impl<S> LivenessSession<S>
+where
+    S: Session + 'static,
+{
     /// Create a new `LivenessSession`, using the given [`Session`], [`LivenessStrategy`], and `timeout`.
     pub fn new(session: S, timeout: Duration, strategy: LivenessStrategy) -> Self {
         Self {
@@ -209,9 +153,12 @@ impl<S: Session> LivenessSession<S> {
         &mut self.session
     }
 }
-impl<S: Session> Session for LivenessSession<S> {
-    type ReadData = S::ReadData;
-    type WriteData = S::WriteData;
+impl<S> Session for LivenessSession<S>
+where
+    S: Session + 'static,
+{
+    type ReadData<'a> = S::ReadData<'a>;
+    type WriteData<'a> = S::WriteData<'a>;
 
     fn is_connected(&self) -> bool {
         self.session.is_connected()
@@ -243,8 +190,8 @@ impl<S: Session> Session for LivenessSession<S> {
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData,
-    ) -> Result<crate::WriteStatus<'a, Self::WriteData>, std::io::Error> {
+        data: &'a Self::WriteData<'a>,
+    ) -> Result<crate::WriteStatus<'a, Self::WriteData<'a>>, std::io::Error> {
         let r = self.session.write(data)?;
         if let WriteStatus::Success = r {
             if self.strategy.write {
@@ -254,7 +201,7 @@ impl<S: Session> Session for LivenessSession<S> {
         Ok(r)
     }
 
-    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData>, std::io::Error> {
+    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData<'a>>, std::io::Error> {
         let r = self.session.read()?;
         if let ReadStatus::Data(_) | ReadStatus::Buffered = r {
             if self.strategy.read {
@@ -272,7 +219,10 @@ impl<S: Session> Session for LivenessSession<S> {
         self.session.close()
     }
 }
-impl<S: TlsSession> TlsSession for LivenessSession<S> {
+impl<S> TlsSession for LivenessSession<S>
+where
+    S: TlsSession + 'static,
+{
     fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error> {
         self.session.to_tls(domain, config)
     }

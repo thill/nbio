@@ -110,23 +110,20 @@
 //! }
 //! ```
 
-use std::io::Error;
-
-use tcp_stream::TLSConfig;
+pub extern crate http as hyperium_http;
+pub extern crate tcp_stream;
 
 pub mod frame;
-
 pub mod http;
-pub extern crate http as hyperium_http;
+pub mod mock;
+pub mod tcp;
+pub mod util;
 
 mod internal;
 
-pub mod mock;
+use std::io::Error;
 
-pub mod tcp;
-pub extern crate tcp_stream;
-
-pub mod util;
+use tcp_stream::TLSConfig;
 
 /// A bi-directional connection supporting generic read and write events.
 ///
@@ -144,10 +141,14 @@ pub mod util;
 /// ## Duty Cycles
 pub trait Session {
     /// The type returned by the `write(..)` function.
-    type WriteData: ?Sized;
+    type WriteData<'a>: ?Sized
+    where
+        Self: 'a;
 
     /// The type returned by the `read(..)` function.
-    type ReadData: ?Sized;
+    type ReadData<'a>: ?Sized
+    where
+        Self: 'a;
 
     /// Check if the session is connected.
     /// If this returns false, use `try_connect(..)` to drive the connection process.
@@ -167,14 +168,14 @@ pub trait Session {
     /// This will return [`WriteStatus::Pending`] if the write is not immediately completed fully.
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData,
-    ) -> Result<WriteStatus<'a, Self::WriteData>, Error>;
+        data: &'a Self::WriteData<'a>,
+    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error>;
 
     /// Attempt to read a `ReadData` from the session.
     /// This will return [`ReadStatus::Data`] when data has been read.
     /// [`ReadStatus::Buffered`] can be used to report that work was completed, but data is not ready.
     /// This means that only [`ReadStatus::None`] should be used to indicate to a scheduler that yielding or idling is appropriate.
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData>, Error>;
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, Error>;
 
     /// Flush all pending write data, blocking until completion.
     fn flush(&mut self) -> Result<(), Error>;

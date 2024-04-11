@@ -49,8 +49,8 @@ pub struct FramingSession<S, F> {
 }
 impl<S, F> FramingSession<S, F>
 where
-    S: Session<ReadData = [u8], WriteData = [u8]>,
-    F: FramingStrategy,
+    S: for<'a> Session<ReadData<'a> = [u8], WriteData<'a> = [u8]> + 'static,
+    F: FramingStrategy + 'static,
 {
     /// Create a new [`FramingSession`]
     ///
@@ -71,11 +71,11 @@ where
 }
 impl<S, F> Session for FramingSession<S, F>
 where
-    S: Session<ReadData = [u8], WriteData = [u8]>,
-    F: FramingStrategy,
+    S: for<'a> Session<ReadData<'a> = [u8], WriteData<'a> = [u8]> + 'static,
+    F: FramingStrategy + 'static,
 {
-    type ReadData = F::ReadFrame;
-    type WriteData = F::WriteFrame;
+    type ReadData<'a> = F::ReadFrame;
+    type WriteData<'a> = F::WriteFrame;
 
     fn is_connected(&self) -> bool {
         self.session.is_connected()
@@ -101,8 +101,8 @@ where
 
     fn write<'a>(
         &mut self,
-        frame: &'a Self::WriteData,
-    ) -> Result<WriteStatus<'a, Self::WriteData>, Error> {
+        frame: &'a Self::WriteData<'a>,
+    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error> {
         if !self.session.is_connected() {
             return Err(Error::new(
                 ErrorKind::NotConnected,
@@ -117,7 +117,7 @@ where
         }
     }
 
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData>, std::io::Error> {
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, std::io::Error> {
         if self.read_advance != 0 {
             let mut new_buf = Vec::from(&self.read_buffer[self.read_advance..]);
             self.read_advance = 0;
@@ -154,8 +154,8 @@ where
 }
 impl<S, F> TlsSession for FramingSession<S, F>
 where
-    S: TlsSession<ReadData = [u8], WriteData = [u8]>,
-    F: FramingStrategy,
+    S: for<'a> TlsSession<ReadData<'a> = [u8], WriteData<'a> = [u8]> + 'static,
+    F: FramingStrategy + 'static,
 {
     fn to_tls(
         &mut self,

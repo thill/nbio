@@ -148,8 +148,8 @@ impl Default for StreamingTcpSession {
     }
 }
 impl Session for StreamingTcpSession {
-    type ReadData = [u8];
-    type WriteData = [u8];
+    type ReadData<'a> = [u8];
+    type WriteData<'a> = [u8];
 
     fn is_connected(&self) -> bool {
         match &self.stream {
@@ -198,8 +198,8 @@ impl Session for StreamingTcpSession {
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData,
-    ) -> Result<WriteStatus<'a, Self::WriteData>, Error> {
+        data: &'a Self::WriteData<'a>,
+    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error> {
         if data.is_empty() {
             // nothing to write, nothing to do
             return Ok(WriteStatus::Success);
@@ -237,7 +237,7 @@ impl Session for StreamingTcpSession {
         }
     }
 
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData>, Error> {
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, Error> {
         let stream = match &mut self.stream {
             Some(x) => x,
             None => {

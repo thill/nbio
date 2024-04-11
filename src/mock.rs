@@ -11,41 +11,44 @@ use crate::{ReadStatus, Session, TlsSession, WriteStatus};
 ///
 /// When the `write_result_queue` is empty, the write will return `Success` and be pushed to the internal `write_queue`.
 /// When the `read_result_queue`, `connect_result_queue`, or `drive_result_queue` are empty, their respective function will return `None` or `false`.
-pub struct MockSession<'a, R, W>
+pub struct MockSession<R, W>
 where
-    R: ?Sized,
-    W: ?Sized + ToOwned,
+    R: ?Sized + ToOwned + 'static,
+    W: ?Sized + ToOwned + 'static,
+    R::Owned: AsRef<R>,
 {
     pub connected: bool,
     pub connect_result_queue: VecDeque<Result<bool, Error>>,
     pub drive_result_queue: VecDeque<Result<bool, Error>>,
-    pub read_result_queue: VecDeque<Result<ReadStatus<'a, R>, Error>>,
-    pub write_result_queue: VecDeque<Result<WriteStatus<'a, W>, Error>>,
+    pub read_queue: VecDeque<R::Owned>,
     pub write_queue: VecDeque<W::Owned>,
+    last_read: Option<R::Owned>,
 }
-impl<'s, R, W> MockSession<'s, R, W>
+impl<R, W> MockSession<R, W>
 where
-    R: ?Sized,
-    W: ?Sized + ToOwned,
+    R: ?Sized + ToOwned + 'static,
+    W: ?Sized + ToOwned + 'static,
+    R::Owned: AsRef<R>,
 {
     pub fn new() -> Self {
         Self {
             connected: true,
             connect_result_queue: VecDeque::new(),
             drive_result_queue: VecDeque::new(),
-            read_result_queue: VecDeque::new(),
-            write_result_queue: VecDeque::new(),
+            read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
+            last_read: None,
         }
     }
 }
-impl<'s, R, W> Session for MockSession<'s, R, W>
+impl<R, W> Session for MockSession<R, W>
 where
-    R: ?Sized,
-    W: ?Sized + ToOwned,
+    R: ?Sized + ToOwned + 'static,
+    W: ?Sized + ToOwned + 'static,
+    R::Owned: AsRef<R>,
 {
-    type WriteData = W;
-    type ReadData = R;
+    type ReadData<'a> = R;
+    type WriteData<'a> = W;
 
     fn is_connected(&self) -> bool {
         self.connected
@@ -67,24 +70,19 @@ where
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData,
-    ) -> Result<crate::WriteStatus<'a, Self::WriteData>, Error> {
-        match self.write_result_queue.pop_front() {
-            Some(Ok(WriteStatus::Success)) | None => {
-                self.write_queue.push_back(data.to_owned());
-                Ok(WriteStatus::Success)
-            }
-            Some(Ok(WriteStatus::Pending(_))) => {
-                panic!("MockSession does not support WriteStatus::Pending")
-            }
-            Some(Err(err)) => Err(err),
-        }
+        data: &'a Self::WriteData<'a>,
+    ) -> Result<crate::WriteStatus<'a, Self::WriteData<'a>>, Error> {
+        self.write_queue.push_back(data.to_owned());
+        Ok(WriteStatus::Success)
     }
 
-    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData>, Error> {
-        match self.read_result_queue.pop_front() {
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, Error> {
+        match self.read_queue.pop_front() {
             None => Ok(ReadStatus::None),
-            Some(x) => x,
+            Some(x) => {
+                self.last_read = Some(x);
+                Ok(ReadStatus::Data(self.last_read.as_ref().unwrap().as_ref()))
+            }
         }
     }
 
@@ -98,10 +96,11 @@ where
     }
 }
 
-impl<'a, R, W> TlsSession for MockSession<'a, R, W>
+impl<R, W> TlsSession for MockSession<R, W>
 where
-    R: ?Sized,
-    W: ?Sized + ToOwned,
+    R: ?Sized + ToOwned + 'static,
+    W: ?Sized + ToOwned + 'static,
+    R::Owned: AsRef<R>,
 {
     fn to_tls(
         &mut self,
@@ -118,26 +117,25 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::io::{Error, ErrorKind};
-
-    use crate::Session;
+    use crate::{ReadStatus, Session};
 
     use super::MockSession;
 
     #[test]
     fn test_mock_session() {
-        let mut sess = MockSession::<'_, [u8], [u8]>::new();
+        let mut sess = MockSession::<[u8], [u8]>::new();
 
         // pop read result
-        sess.read_result_queue
-            .push_back(Err(Error::new(ErrorKind::BrokenPipe, "write test")));
-        assert!(sess.read().is_err());
-        assert!(sess.read().is_ok());
+        sess.read_queue
+            .push_back("hello, reader!".as_bytes().to_vec());
+        if let ReadStatus::Data(x) = sess.read().unwrap() {
+            assert_eq!(x, "hello, reader!".as_bytes());
+        } else {
+            panic!("Data");
+        }
 
         // pop write result
-        sess.write_result_queue
-            .push_back(Err(Error::new(ErrorKind::BrokenPipe, "write test")));
-        assert!(sess.write(&vec![0, 1]).is_err());
+        assert!(sess.write(&vec![0, 1]).is_ok());
         assert!(sess.write(&vec![2, 3]).is_ok());
 
         // pop user write

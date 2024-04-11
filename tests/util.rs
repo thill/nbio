@@ -6,17 +6,17 @@ use std::{
 use nbio::{
     mock::MockSession,
     util::{HeartbeatResult, HeartbeatingSession, LivenessSession, LivenessStrategy},
-    ReadStatus, Session,
+    Session,
 };
 
 #[test]
 fn test_heartbeat() {
     let seq = AtomicUsize::new(0);
     let mut sess = HeartbeatingSession::new(
-        MockSession::new(),
+        MockSession::<[usize], [usize]>::new(),
         Duration::from_millis(50),
-        move |s: &mut dyn Session<WriteData = usize, ReadData = usize>| {
-            s.write(&seq.fetch_add(1, Ordering::AcqRel))?;
+        move |s| {
+            s.write(&[seq.fetch_add(1, Ordering::AcqRel)])?;
             Ok(HeartbeatResult::Sent)
         },
     );
@@ -30,16 +30,43 @@ fn test_heartbeat() {
     sess.drive().unwrap();
 
     // assert at least 3 and at most 5 heartbeats received
-    assert_eq!(0, sess.session_mut().write_queue.pop_front().unwrap());
-    assert_eq!(1, sess.session_mut().write_queue.pop_front().unwrap());
-    assert_eq!(2, sess.session_mut().write_queue.pop_front().unwrap());
+    assert_eq!(
+        0,
+        *sess
+            .session_mut()
+            .write_queue
+            .pop_front()
+            .unwrap()
+            .get(0)
+            .unwrap()
+    );
+    assert_eq!(
+        1,
+        *sess
+            .session_mut()
+            .write_queue
+            .pop_front()
+            .unwrap()
+            .get(0)
+            .unwrap()
+    );
+    assert_eq!(
+        2,
+        *sess
+            .session_mut()
+            .write_queue
+            .pop_front()
+            .unwrap()
+            .get(0)
+            .unwrap()
+    );
     assert!(sess.session().write_queue.len() <= 2);
 }
 
 #[test]
 fn test_liveness() {
     let mut sess = LivenessSession::new(
-        MockSession::new(),
+        MockSession::<[u8], [u8]>::new(),
         Duration::from_millis(50),
         LivenessStrategy::default(),
     );
@@ -47,11 +74,9 @@ fn test_liveness() {
     // send and drive for longer than interval
     let end = SystemTime::now() + Duration::from_millis(100);
     while SystemTime::now() < end {
-        sess.session_mut()
-            .read_result_queue
-            .push_back(Ok(ReadStatus::Data(&(0 as usize))));
+        sess.session_mut().read_queue.push_back(vec![0]);
         sess.read().unwrap();
-        sess.write(&(0 as usize)).unwrap();
+        sess.write(&[0]).unwrap();
         assert!(sess.session_mut().write_queue.pop_front().is_some());
         sess.drive().unwrap();
         std::thread::sleep(Duration::from_millis(1));
