@@ -11,22 +11,22 @@ use crate::{ReadStatus, Session, TlsSession, WriteStatus};
 ///
 /// When the `write_result_queue` is empty, the write will return `Success` and be pushed to the internal `write_queue`.
 /// When the `read_result_queue`, `connect_result_queue`, or `drive_result_queue` are empty, their respective function will return `None` or `false`.
-pub struct MockSession<'a, R, W, WO>
+pub struct MockSession<'a, R, W>
 where
     R: ?Sized,
-    W: ?Sized + ToOwned<Owned = WO>,
+    W: ?Sized + ToOwned,
 {
     pub connected: bool,
     pub connect_result_queue: VecDeque<Result<bool, Error>>,
     pub drive_result_queue: VecDeque<Result<bool, Error>>,
     pub read_result_queue: VecDeque<Result<ReadStatus<'a, R>, Error>>,
     pub write_result_queue: VecDeque<Result<WriteStatus<'a, W>, Error>>,
-    pub write_queue: VecDeque<WO>,
+    pub write_queue: VecDeque<W::Owned>,
 }
-impl<'s, R, W, WO> MockSession<'s, R, W, WO>
+impl<'s, R, W> MockSession<'s, R, W>
 where
     R: ?Sized,
-    W: ?Sized + ToOwned<Owned = WO>,
+    W: ?Sized + ToOwned,
 {
     pub fn new() -> Self {
         Self {
@@ -39,10 +39,10 @@ where
         }
     }
 }
-impl<'s, R, W, WO> Session for MockSession<'s, R, W, WO>
+impl<'s, R, W> Session for MockSession<'s, R, W>
 where
     R: ?Sized,
-    W: ?Sized + ToOwned<Owned = WO>,
+    W: ?Sized + ToOwned,
 {
     type WriteData = W;
     type ReadData = R;
@@ -98,10 +98,10 @@ where
     }
 }
 
-impl<'a, R, W, WO> TlsSession for MockSession<'a, R, W, WO>
+impl<'a, R, W> TlsSession for MockSession<'a, R, W>
 where
     R: ?Sized,
-    W: ?Sized + ToOwned<Owned = WO>,
+    W: ?Sized + ToOwned,
 {
     fn to_tls(
         &mut self,
@@ -126,7 +126,7 @@ mod test {
 
     #[test]
     fn test_mock_session() {
-        let mut sess = MockSession::<'_, [u8], [u8], Vec<u8>>::new();
+        let mut sess = MockSession::<'_, [u8], [u8]>::new();
 
         // pop read result
         sess.read_result_queue
