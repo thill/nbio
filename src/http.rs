@@ -5,7 +5,10 @@ use std::{
     str::FromStr,
 };
 
-use hyperium_http::header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
+use hyperium_http::{
+    header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
+    Response,
+};
 use tcp_stream::OwnedTLSConfig;
 
 use crate::{
@@ -191,11 +194,14 @@ impl Session for HttpClientSession {
         if self.session.is_connected() && self.pending_initial_request.is_some() {
             let wrote = match self.session.write(
                 self.pending_initial_request
-                    .as_ref()
+                    .take()
                     .expect("checked pending_request"),
             )? {
                 WriteStatus::Success => true,
-                WriteStatus::Pending(_) => false,
+                WriteStatus::Pending(x) => {
+                    self.pending_initial_request = Some(x);
+                    false
+                }
             };
             if wrote {
                 self.pending_initial_request = None;
@@ -207,12 +213,12 @@ impl Session for HttpClientSession {
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData<'a>,
-    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error> {
+        data: Self::WriteData<'a>,
+    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error> {
         self.session.write(data)
     }
 
-    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData<'a>>, Error> {
+    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<Self::ReadData<'a>>, Error> {
         if self.pending_initial_request.is_none() && self.is_connected() {
             // make the request/response model more straightforward by not requiring checks to `is_connected` before calling `read`.
             // `self.pending_initial_request.is_none()`: only do this when an initial request is pending, otherwise revert to default `read` behavior for persistent streams.
@@ -267,7 +273,7 @@ impl BodyInfo {
 /// A [`FramingStrategy`] for HTTP 1.x where [`FramingStrategy::WriteFrame`] is an [`http::Request`], and the [`FramingStrategy::ReadFrame`] is an [`http::Response`].
 pub struct Http1FramingStrategy {
     serialized_request: Vec<u8>,
-    deserialized_response: hyperium_http::Response<Vec<u8>>,
+    deserialized_response: Option<hyperium_http::Response<Vec<u8>>>,
     deserialized_size: usize,
     body_info: Option<BodyInfo>,
 }
@@ -275,17 +281,25 @@ impl Http1FramingStrategy {
     pub fn new() -> Self {
         Self {
             serialized_request: Vec::new(),
-            deserialized_response: hyperium_http::Response::new(Vec::new()),
+            deserialized_response: None,
             deserialized_size: 0,
             body_info: None,
         }
     }
 }
 impl FramingStrategy for Http1FramingStrategy {
-    type ReadFrame = hyperium_http::Response<Vec<u8>>;
-    type WriteFrame = hyperium_http::Request<Vec<u8>>;
+    type ReadFrame<'a> = hyperium_http::Response<Vec<u8>>;
+    type WriteFrame<'a> = hyperium_http::Request<Vec<u8>>;
 
     fn check_deserialize_frame(&mut self, data: &[u8], eof: bool) -> Result<bool, Error> {
+        if self.deserialized_response.is_none() {
+            self.deserialized_response = Some(Response::new(Vec::new()));
+        }
+        let deserialized_response = self
+            .deserialized_response
+            .as_mut()
+            .expect("checked deserialized_response value");
+
         let header_count: usize = count_max_headers(data);
         let mut headers = Vec::new();
         headers.resize(header_count, httparse::EMPTY_HEADER);
@@ -312,7 +326,7 @@ impl FramingStrategy for Http1FramingStrategy {
                         self.body_info = Some(BodyInfo::new(size, BodyType::None));
                     }
                     // parse into cached deserialized_response
-                    parsed_into_response(parsed, &mut self.deserialized_response)?;
+                    parsed_into_response(parsed, deserialized_response)?;
                 }
                 httparse::Status::Partial => return Ok(false),
             }
@@ -373,7 +387,7 @@ impl FramingStrategy for Http1FramingStrategy {
                 }
             }
             Some(mut body) => {
-                swap(self.deserialized_response.body_mut(), &mut body);
+                swap(deserialized_response.body_mut(), &mut body);
                 // reset parsed body info for next response parsing iteration, allowing for use of keep-alive
                 self.body_info = None;
                 Ok(true)
@@ -384,17 +398,19 @@ impl FramingStrategy for Http1FramingStrategy {
     fn deserialize_frame<'a>(
         &'a mut self,
         _data: &'a [u8],
-    ) -> Result<crate::frame::DeserializedFrame<'a, Self::ReadFrame>, Error> {
+    ) -> Result<crate::frame::DeserializedFrame<Self::ReadFrame<'a>>, Error> {
         // return response that was deserialized in `check_deserialize_frame(..)`
         Ok(DeserializedFrame::new(
-            &self.deserialized_response,
+            self.deserialized_response
+                .take()
+                .ok_or_else(|| Error::new(ErrorKind::Other, "no deserialized frame"))?,
             self.deserialized_size,
         ))
     }
 
-    fn serialize_frame<'a>(
+    fn serialize_frame<'a, 'b>(
         &'a mut self,
-        request: &'a Self::WriteFrame,
+        request: &'a Self::WriteFrame<'b>,
     ) -> Result<Vec<&'a [u8]>, Error> {
         // check version
         match request.version() {

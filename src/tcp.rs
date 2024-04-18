@@ -156,8 +156,8 @@ impl TcpSession {
     }
 }
 impl Session for TcpSession {
-    type ReadData<'a> = [u8];
-    type WriteData<'a> = [u8];
+    type ReadData<'a> = &'a [u8];
+    type WriteData<'a> = &'a [u8];
 
     fn is_connected(&self) -> bool {
         match self.connection {
@@ -200,8 +200,8 @@ impl Session for TcpSession {
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData<'a>,
-    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error> {
+        data: Self::WriteData<'a>,
+    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error> {
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
@@ -240,7 +240,7 @@ impl Session for TcpSession {
         }
     }
 
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, Error> {
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, Error> {
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,

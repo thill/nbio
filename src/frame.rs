@@ -49,7 +49,7 @@ pub struct FramingSession<S, F> {
 }
 impl<S, F> FramingSession<S, F>
 where
-    S: for<'a> Session<ReadData<'a> = [u8], WriteData<'a> = [u8]> + 'static,
+    S: for<'a> Session<ReadData<'a> = &'a [u8], WriteData<'a> = &'a [u8]> + 'static,
     F: FramingStrategy + 'static,
 {
     /// Create a new [`FramingSession`]
@@ -71,11 +71,11 @@ where
 }
 impl<S, F> Session for FramingSession<S, F>
 where
-    S: for<'a> Session<ReadData<'a> = [u8], WriteData<'a> = [u8]> + 'static,
+    S: for<'a> Session<ReadData<'a> = &'a [u8], WriteData<'a> = &'a [u8]> + 'static,
     F: FramingStrategy + 'static,
 {
-    type ReadData<'a> = F::ReadFrame;
-    type WriteData<'a> = F::WriteFrame;
+    type ReadData<'a> = F::ReadFrame<'a>;
+    type WriteData<'a> = F::WriteFrame<'a>;
 
     fn is_connected(&self) -> bool {
         self.session.is_connected()
@@ -97,8 +97,8 @@ where
 
     fn write<'a>(
         &mut self,
-        frame: &'a Self::WriteData<'a>,
-    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error> {
+        frame: Self::WriteData<'a>,
+    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error> {
         if !self.session.is_connected() {
             return Err(Error::new(
                 ErrorKind::NotConnected,
@@ -109,11 +109,11 @@ where
         if self.write_buffer.try_write(&data)? {
             Ok(WriteStatus::Success)
         } else {
-            Ok(WriteStatus::Pending(&frame))
+            Ok(WriteStatus::Pending(frame))
         }
     }
 
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, std::io::Error> {
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, std::io::Error> {
         if self.read_advance != 0 {
             let mut new_buf = Vec::from(&self.read_buffer[self.read_advance..]);
             self.read_advance = 0;
@@ -154,7 +154,9 @@ pub trait FramingStrategy {
     /// - Framed `[u8]` contents for streaming binary messages
     /// - JSON payload for streaming JSON messages
     /// - `HttpResponse` for an HttpClient connection
-    type ReadFrame: ?Sized;
+    type ReadFrame<'a>
+    where
+        Self: 'a;
 
     /// Type returned by `serialize_frame`
     ///
@@ -162,7 +164,9 @@ pub trait FramingStrategy {
     /// - Framed `[u8]` contents for streaming binary messages
     /// - JSON payload streaming JSON messages
     /// - `HttpRequest` for an HttpClient connection
-    type WriteFrame: ?Sized;
+    type WriteFrame<'a>
+    where
+        Self: 'a;
 
     /// Returns if the given buffer contains a full frame starting at offset=0.
     ///
@@ -185,7 +189,7 @@ pub trait FramingStrategy {
     fn deserialize_frame<'a>(
         &'a mut self,
         data: &'a [u8],
-    ) -> Result<DeserializedFrame<'a, Self::ReadFrame>, Error>;
+    ) -> Result<DeserializedFrame<Self::ReadFrame<'a>>, Error>;
 
     /// Serialize the given frame, returning a `Vec<&[u8]>` representing the serialized frame.
     ///
@@ -194,19 +198,19 @@ pub trait FramingStrategy {
     ///
     /// The lifetime of the returned data is bound to `&self`.
     /// This allows the `FramingStrategy` to parse data to an internal field and return the reference.
-    fn serialize_frame<'a>(
+    fn serialize_frame<'a, 'b>(
         &'a mut self,
-        data: &'a Self::WriteFrame,
+        data: &'a Self::WriteFrame<'b>,
     ) -> Result<Vec<&'a [u8]>, Error>;
 }
 
 /// Returns the parsed and total deserialized size frame for [`FramingStrategy`] `deserialize_frame`.
-pub struct DeserializedFrame<'a, T: ?Sized> {
-    pub frame: &'a T,
+pub struct DeserializedFrame<T> {
+    pub frame: T,
     pub size: usize,
 }
-impl<'a, T: ?Sized> DeserializedFrame<'a, T> {
-    pub fn new(frame: &'a T, size: usize) -> Self {
+impl<T> DeserializedFrame<T> {
+    pub fn new(frame: T, size: usize) -> Self {
         Self { frame, size }
     }
 }
@@ -221,11 +225,11 @@ impl U64FramingStrategy {
     }
 }
 impl FramingStrategy for U64FramingStrategy {
-    type ReadFrame = [u8];
-    type WriteFrame = [u8];
-    fn serialize_frame<'a>(
+    type ReadFrame<'a> = &'a [u8];
+    type WriteFrame<'a> = &'a [u8];
+    fn serialize_frame<'a, 'b>(
         &'a mut self,
-        data: &'a Self::ReadFrame,
+        data: &'a Self::ReadFrame<'b>,
     ) -> Result<Vec<&'a [u8]>, Error> {
         let len = u64::try_from(data.len())
             .map_err(|_| Error::new(ErrorKind::InvalidData, "frame to serialize exceeds u64"))?;
@@ -254,7 +258,7 @@ impl FramingStrategy for U64FramingStrategy {
     fn deserialize_frame<'a>(
         &'a mut self,
         data: &'a [u8],
-    ) -> Result<DeserializedFrame<'a, Self::WriteFrame>, Error> {
+    ) -> Result<DeserializedFrame<Self::WriteFrame<'a>>, Error> {
         if data.len() < 8 {
             return Err(Error::new(
                 ErrorKind::InvalidData,

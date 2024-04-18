@@ -72,12 +72,12 @@ where
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData<'a>,
-    ) -> Result<crate::WriteStatus<'a, Self::WriteData<'a>>, std::io::Error> {
+        data: Self::WriteData<'a>,
+    ) -> Result<crate::WriteStatus<Self::WriteData<'a>>, std::io::Error> {
         self.session.write(data)
     }
 
-    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData<'a>>, std::io::Error> {
+    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<Self::ReadData<'a>>, std::io::Error> {
         self.session.read()
     }
 
@@ -156,8 +156,8 @@ where
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData<'a>,
-    ) -> Result<crate::WriteStatus<'a, Self::WriteData<'a>>, std::io::Error> {
+        data: Self::WriteData<'a>,
+    ) -> Result<crate::WriteStatus<Self::WriteData<'a>>, std::io::Error> {
         let r = self.session.write(data)?;
         if let WriteStatus::Success = r {
             if self.strategy.write {
@@ -167,7 +167,7 @@ where
         Ok(r)
     }
 
-    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData<'a>>, std::io::Error> {
+    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<Self::ReadData<'a>>, std::io::Error> {
         let r = self.session.read()?;
         if let ReadStatus::Data(_) | ReadStatus::Buffered = r {
             if self.strategy.read {

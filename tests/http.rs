@@ -68,7 +68,7 @@ fn test_keep_alive() {
 
     // write another request
     conn.write(
-        &Request::get("http://icanhazip.com")
+        Request::get("http://icanhazip.com")
             .body(Vec::new())
             .unwrap(),
     )

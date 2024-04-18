@@ -11,23 +11,16 @@ use crate::{ReadStatus, Session, WriteStatus};
 ///
 /// When the `write_result_queue` is empty, the write will return `Success` and be pushed to the internal `write_queue`.
 /// When the `read_result_queue`, `connect_result_queue`, or `drive_result_queue` are empty, their respective function will return `None` or `false`.
-pub struct MockSession<R, W>
-where
-    R: ?Sized + ToOwned + 'static,
-    W: ?Sized + ToOwned + 'static,
-    R::Owned: AsRef<R>,
-{
+pub struct MockSession<R, W> {
     pub connected: bool,
     pub drive_result_queue: VecDeque<Result<bool, Error>>,
-    pub read_queue: VecDeque<R::Owned>,
-    pub write_queue: VecDeque<W::Owned>,
-    last_read: Option<R::Owned>,
+    pub read_queue: VecDeque<R>,
+    pub write_queue: VecDeque<W>,
 }
 impl<R, W> MockSession<R, W>
 where
-    R: ?Sized + ToOwned + 'static,
-    W: ?Sized + ToOwned + 'static,
-    R::Owned: AsRef<R>,
+    R: 'static,
+    W: 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -35,15 +28,13 @@ where
             drive_result_queue: VecDeque::new(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
-            last_read: None,
         }
     }
 }
 impl<R, W> Session for MockSession<R, W>
 where
-    R: ?Sized + ToOwned + 'static,
-    W: ?Sized + ToOwned + 'static,
-    R::Owned: AsRef<R>,
+    R: 'static,
+    W: 'static,
 {
     type ReadData<'a> = R;
     type WriteData<'a> = W;
@@ -61,19 +52,16 @@ where
 
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData<'a>,
-    ) -> Result<crate::WriteStatus<'a, Self::WriteData<'a>>, Error> {
-        self.write_queue.push_back(data.to_owned());
+        data: Self::WriteData<'a>,
+    ) -> Result<crate::WriteStatus<Self::WriteData<'a>>, Error> {
+        self.write_queue.push_back(data);
         Ok(WriteStatus::Success)
     }
 
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, Error> {
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, Error> {
         match self.read_queue.pop_front() {
             None => Ok(ReadStatus::None),
-            Some(x) => {
-                self.last_read = Some(x);
-                Ok(ReadStatus::Data(self.last_read.as_ref().unwrap().as_ref()))
-            }
+            Some(x) => Ok(ReadStatus::Data(x)),
         }
     }
 
@@ -90,11 +78,10 @@ mod test {
 
     #[test]
     fn test_mock_session() {
-        let mut sess = MockSession::<[u8], [u8]>::new();
+        let mut sess = MockSession::<&[u8], &[u8]>::new();
 
         // pop read result
-        sess.read_queue
-            .push_back("hello, reader!".as_bytes().to_vec());
+        sess.read_queue.push_back("hello, reader!".as_bytes());
         if let ReadStatus::Data(x) = sess.read().unwrap() {
             assert_eq!(x, "hello, reader!".as_bytes());
         } else {
@@ -102,8 +89,8 @@ mod test {
         }
 
         // pop write result
-        assert!(sess.write(&vec![0, 1]).is_ok());
-        assert!(sess.write(&vec![2, 3]).is_ok());
+        assert!(sess.write(&[0, 1]).is_ok());
+        assert!(sess.write(&[2, 3]).is_ok());
 
         // pop user write
         assert_eq!(sess.write_queue.pop_front().unwrap(), vec![0, 1]);

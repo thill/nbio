@@ -147,12 +147,12 @@ use std::io::Error;
 /// Some [`Session`] implementations will require periodic calls to `drive(..)` in order to function.
 pub trait Session {
     /// The type returned by the `write(..)` function.
-    type WriteData<'a>: ?Sized
+    type WriteData<'a>
     where
         Self: 'a;
 
     /// The type returned by the `read(..)` function.
-    type ReadData<'a>: ?Sized
+    type ReadData<'a>
     where
         Self: 'a;
 
@@ -170,14 +170,14 @@ pub trait Session {
     /// This will return [`WriteStatus::Pending`] if the write is not immediately completed fully.
     fn write<'a>(
         &mut self,
-        data: &'a Self::WriteData<'a>,
-    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error>;
+        data: Self::WriteData<'a>,
+    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error>;
 
     /// Attempt to read a `ReadData` from the session.
     /// This will return [`ReadStatus::Data`] when data has been read.
     /// [`ReadStatus::Buffered`] can be used to report that work was completed, but data is not ready.
     /// This means that only [`ReadStatus::None`] should be used to indicate to a scheduler that yielding or idling is appropriate.
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, Error>;
+    fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, Error>;
 
     /// Flush all pending write data, blocking until completion.
     fn flush(&mut self) -> Result<(), Error>;
@@ -186,9 +186,9 @@ pub trait Session {
 /// Returned by the [`Session`] read function, providing the outcome or information about the read action.
 ///
 /// The generic type `T` will match the cooresponding [`Session::ReadData`].
-pub enum ReadStatus<'a, T: ?Sized> {
+pub enum ReadStatus<T> {
     /// Contains a reference to data read from the underlying [`Session`]
-    Data(&'a T),
+    Data(T),
 
     /// Data was buffered. This means a partial message was received, but could not be returned as complete `Data`.
     Buffered,
@@ -200,7 +200,7 @@ pub enum ReadStatus<'a, T: ?Sized> {
 /// Returned by the [`Session`] write function, providing the outcome of the write action.
 ///
 /// The generic type `T` will match the cooresponding [`Session::ReadData`].
-pub enum WriteStatus<'a, T: ?Sized> {
+pub enum WriteStatus<T> {
     /// The write action completed fully
     Success,
 
@@ -212,5 +212,5 @@ pub enum WriteStatus<'a, T: ?Sized> {
     /// If you are looking for a general retry pattern, it is **always** safe to finish the write by passing this returned
     /// reference back into the `write` function for another attempt, but it is only **sometimes** appropriate to return the entire
     /// original write reference into the `write` function for a second attempt.
-    Pending(&'a T),
+    Pending(T),
 }
