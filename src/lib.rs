@@ -110,12 +110,16 @@
 //! }
 //! ```
 
+#[cfg(all(feature = "http"))]
 pub extern crate http as hyperium_http;
+#[cfg(all(feature = "tcp"))]
 pub extern crate tcp_stream;
 
 pub mod frame;
+#[cfg(all(feature = "http"))]
 pub mod http;
 pub mod mock;
+#[cfg(all(feature = "tcp"))]
 pub mod tcp;
 pub mod util;
 
