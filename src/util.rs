@@ -5,9 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use tcp_stream::TLSConfig;
-
-use crate::{ReadStatus, Session, TlsSession, WriteStatus};
+use crate::{ReadStatus, Session, WriteStatus};
 
 /// Encapsulates an underlying session, writing a user-defined "heartbeat" message as a given interval.
 ///
@@ -58,10 +56,6 @@ where
         self.session.is_connected()
     }
 
-    fn try_connect(&mut self) -> Result<bool, std::io::Error> {
-        self.session.try_connect()
-    }
-
     fn drive(&mut self) -> Result<bool, std::io::Error> {
         let now = SystemTime::now();
         if now >= self.next_heartbeat {
@@ -89,23 +83,6 @@ where
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
         self.session.flush()
-    }
-
-    fn close(&mut self) -> Result<(), std::io::Error> {
-        self.session.close()
-    }
-}
-impl<S, F> TlsSession for HeartbeatingSession<S, F>
-where
-    S: TlsSession + 'static,
-    F: for<'a> FnMut(&mut S) -> Result<HeartbeatResult, Error> + 'static,
-{
-    fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error> {
-        self.session.to_tls(domain, config)
-    }
-
-    fn is_handshake_complete(&self) -> Result<bool, Error> {
-        self.session.is_handshake_complete()
     }
 }
 
@@ -164,17 +141,6 @@ where
         self.session.is_connected()
     }
 
-    fn try_connect(&mut self) -> Result<bool, std::io::Error> {
-        if self.session.try_connect()? {
-            if self.strategy.connect {
-                self.liveness = SystemTime::now() + self.timeout;
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
     fn drive(&mut self) -> Result<bool, std::io::Error> {
         if self.session.drive()? {
             if self.strategy.drive {
@@ -213,22 +179,6 @@ where
 
     fn flush(&mut self) -> Result<(), std::io::Error> {
         self.session.flush()
-    }
-
-    fn close(&mut self) -> Result<(), std::io::Error> {
-        self.session.close()
-    }
-}
-impl<S> TlsSession for LivenessSession<S>
-where
-    S: TlsSession + 'static,
-{
-    fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error> {
-        self.session.to_tls(domain, config)
-    }
-
-    fn is_handshake_complete(&self) -> Result<bool, Error> {
-        self.session.is_handshake_complete()
     }
 }
 

@@ -1,4 +1,4 @@
-//! A non-blocking HTTP 1.x client
+//! A non-blocking HTTP client
 use std::{
     io::{self, Error, ErrorKind, Read},
     mem::swap,
@@ -10,23 +10,31 @@ use tcp_stream::OwnedTLSConfig;
 
 use crate::{
     frame::{DeserializedFrame, FramingSession, FramingStrategy},
-    tcp::StreamingTcpSession,
-    Session, TlsSession, WriteStatus,
+    tcp::TcpSession,
+    Session, WriteStatus,
 };
 
-pub type HttpClientSession = FramingSession<StreamingTcpSession, Http1FramingStrategy>;
-
-/// A simple non-blocking HTTP 1.x client
+/// A simple non-blocking HTTP 1.1 client
 ///
-/// Calling `request(..)` will return a [`HttpClientSession`], which is simply a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
-/// The framing strategy utilizes Hyperium's [`http`] lib for [`http::Request`] and [`http::Response`] structs.
+/// Calling `connect(..)` or `request(..)` will return a [`HttpClientSession`], which encapsulates a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
+/// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
 ///
-/// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will have pre-buffered the serialized request request.
-/// Calling `drive(..)` and `read(..)` will perform the TLS handshake, flush the pending request, buffer the response, and return a deserialized [`http::Response`].
+/// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will pre-buffer the serialized request.
+/// Calls to `drive(..)` will perform the TLS handshake and flush the pending request.
+/// Calls to `read(..)` will buffer the response, and return a deserialized [`hyperium_http::Response`].
 ///
-/// For now, this only supports HTTP 1.x.
+/// For now, this only supports HTTP 1.1.
 ///
-/// Example:
+/// ## Functions
+///
+/// [`HttpClient::request`] will open a [`HttpClientSession`] for the given [`hyperium_http::Request`], buffering the request, which can be driven and read to completion.
+/// To open a connection without an immeidate pending [`hyperium_http::Request`], use [`HttpClient::connect`], which simply opens a persistent connection.
+///
+/// [`HttpClient::connect`] will open a persistent [`HttpClientSession`] to the given domain. This connection must call [`Session::drive()`] until [`Session::is_connected`]
+/// returns `true`, at which point the session can send multiple [`hyperium_http::Request`] payloads and receive [`hyperium_http::Response`] payloads utilizing HTTP "keep-alive".
+///
+/// ## Example
+///
 /// ```no_run
 /// use nbio::{Session, ReadStatus};
 /// use nbio::http::HttpClient;
@@ -34,7 +42,7 @@ pub type HttpClientSession = FramingSession<StreamingTcpSession, Http1FramingStr
 /// use nbio::tcp_stream::OwnedTLSConfig;
 ///
 /// // create the client and make the request
-/// let mut client = HttpClient::new(OwnedTLSConfig::default());
+/// let mut client = HttpClient::new();
 /// let mut conn = client
 ///     .request(Request::get("http://icanhazip.com").body(()).unwrap())
 ///     .unwrap();
@@ -49,19 +57,71 @@ pub type HttpClientSession = FramingSession<StreamingTcpSession, Http1FramingStr
 ///     }
 /// }
 /// ```
+///
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scheme {
+    Http,
+    Https,
+}
+impl Scheme {
+    pub fn default_port(&self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https => 443,
+        }
+    }
+}
+
+// TODO: add `connect` function that returns a HttpClientSession but does not automatically send a request
+// TODO: have `request` return a HttpClientSession with a pending Request, and will drive connecting and writing the request using calls to read()
 pub struct HttpClient {
     tls_config: OwnedTLSConfig,
 }
 impl HttpClient {
-    /// Create a new HttpClient using the given TLS config
-    pub fn new(tls_config: OwnedTLSConfig) -> Self {
-        Self { tls_config }
+    /// Create a new HttpClient
+    pub fn new() -> Self {
+        Self {
+            tls_config: OwnedTLSConfig::default(),
+        }
     }
 
-    /// Initiate a new HTTP connection and buffer the given request.
+    /// Override the default TLS config
+    pub fn with_tls_config(mut self, tls_config: OwnedTLSConfig) -> Self {
+        self.tls_config = tls_config;
+        self
+    }
+
+    /// Initiate a new HTTP connection that is ready for a new request.
     ///
-    /// This will return a [`HttpClientSession`], which is simply a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
-    /// The framing strategy utilizes Hyperium's [`http`] lib for [`http::Request`] and [`http::Response`] structs.
+    /// This will return a [`HttpClientSession`], which encapsulates a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
+    /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
+    ///
+    /// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will have pre-buffered the serialized request request.
+    /// Before calling `read`/`write`, call [`Session::drive()`] to finish connecting and complete any pending TLS handshakes until [`Session::is_connected`] returns true.
+    ///
+    /// For now, this only supports HTTP 1.x.
+    pub fn connect(
+        &mut self,
+        host: &str,
+        port: u16,
+        scheme: Scheme,
+    ) -> Result<HttpClientSession, io::Error> {
+        let mut conn = TcpSession::connect(format!("{host}:{port}"))?;
+        if scheme == Scheme::Https {
+            conn = conn.into_tls(&host, self.tls_config.as_ref())?;
+        }
+        Ok(HttpClientSession::new(FramingSession::new(
+            conn,
+            Http1FramingStrategy::new(),
+            0,
+        )))
+    }
+
+    /// Initiate a new HTTP connection that will send the given request.
+    ///
+    /// This will return a [`HttpClientSession`], which encapsulates a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
+    /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
     ///
     /// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will have pre-buffered the serialized request request.
     /// Calling `drive(..)` and `read(..)` will perform the TLS handshake, flush the pending request, buffer the response, and return a deserialized [`http::Response`].
@@ -74,10 +134,10 @@ impl HttpClient {
         let (parts, body) = request.into_parts();
         let request = hyperium_http::Request::from_parts(parts, body.into_body());
 
-        let https = match request.uri().scheme_str() {
-            None => false,
-            Some("http") => false,
-            Some("https") => true,
+        let scheme = match request.uri().scheme_str() {
+            None => Scheme::Http,
+            Some("http") => Scheme::Http,
+            Some("https") => Scheme::Https,
             _ => return Err(io::Error::new(ErrorKind::InvalidData, "bad uri scheme")),
         };
         let host = match request.uri().host() {
@@ -86,32 +146,84 @@ impl HttpClient {
         };
         let port = match request.uri().port() {
             Some(x) => x.as_u16(),
-            None => {
-                if https {
-                    443
-                } else {
-                    80
-                }
-            }
+            None => scheme.default_port(),
         };
 
-        // start connection
-        let mut conn = FramingSession::new(
-            StreamingTcpSession::connect(&format!("{}:{}", host, port))?.with_nonblocking(true)?,
-            Http1FramingStrategy::new(),
-            0,
-        );
-        if https {
-            conn.to_tls(&host, self.tls_config.as_ref())?;
-        }
-        if let WriteStatus::Pending(_) = conn.write(&request)? {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "http payload should have buffered",
-            ));
-        }
+        let mut conn = self.connect(&host, port, scheme)?;
+        conn.pending_initial_request = Some(request);
 
         Ok(conn)
+    }
+}
+impl Default for HttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// pub type HttpClientSession = FramingSession<TcpSession, Http1FramingStrategy>;
+/// A [`Session`] created by the [`HttpClient`].
+///
+/// This encapsulates a [`FramingSession<TcpSession, Http1FramingStrategy>`] and allows a single [`hyperium_http::Request`]
+/// to be enqueued prior to a successful connection, supporting the [`HttpClient::request`] function.
+pub struct HttpClientSession {
+    session: FramingSession<TcpSession, Http1FramingStrategy>,
+    pending_initial_request: Option<hyperium_http::Request<Vec<u8>>>,
+}
+impl HttpClientSession {
+    pub fn new(session: FramingSession<TcpSession, Http1FramingStrategy>) -> Self {
+        Self {
+            session,
+            pending_initial_request: None,
+        }
+    }
+}
+impl Session for HttpClientSession {
+    type ReadData<'a> = hyperium_http::Response<Vec<u8>>;
+    type WriteData<'a> = hyperium_http::Request<Vec<u8>>;
+
+    fn is_connected(&self) -> bool {
+        self.session.is_connected()
+    }
+
+    fn drive(&mut self) -> Result<bool, Error> {
+        let mut result = self.session.drive()?;
+        if self.session.is_connected() && self.pending_initial_request.is_some() {
+            let wrote = match self.session.write(
+                self.pending_initial_request
+                    .as_ref()
+                    .expect("checked pending_request"),
+            )? {
+                WriteStatus::Success => true,
+                WriteStatus::Pending(_) => false,
+            };
+            if wrote {
+                self.pending_initial_request = None;
+                result |= true;
+            }
+        }
+        Ok(result)
+    }
+
+    fn write<'a>(
+        &mut self,
+        data: &'a Self::WriteData<'a>,
+    ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error> {
+        self.session.write(data)
+    }
+
+    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<'a, Self::ReadData<'a>>, Error> {
+        if self.pending_initial_request.is_none() && self.is_connected() {
+            // make the request/response model more straightforward by not requiring checks to `is_connected` before calling `read`.
+            // `self.pending_initial_request.is_none()`: only do this when an initial request is pending, otherwise revert to default `read` behavior for persistent streams.
+            self.session.read()
+        } else {
+            Ok(crate::ReadStatus::None)
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.session.flush()
     }
 }
 

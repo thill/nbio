@@ -2,7 +2,7 @@
 
 use std::{collections::VecDeque, io::Error};
 
-use crate::{ReadStatus, Session, TlsSession, WriteStatus};
+use crate::{ReadStatus, Session, WriteStatus};
 
 /// A mock session, using internal [`VecDeque`] instances to drive results returned on function calls.
 ///
@@ -18,7 +18,6 @@ where
     R::Owned: AsRef<R>,
 {
     pub connected: bool,
-    pub connect_result_queue: VecDeque<Result<bool, Error>>,
     pub drive_result_queue: VecDeque<Result<bool, Error>>,
     pub read_queue: VecDeque<R::Owned>,
     pub write_queue: VecDeque<W::Owned>,
@@ -33,7 +32,6 @@ where
     pub fn new() -> Self {
         Self {
             connected: true,
-            connect_result_queue: VecDeque::new(),
             drive_result_queue: VecDeque::new(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -52,13 +50,6 @@ where
 
     fn is_connected(&self) -> bool {
         self.connected
-    }
-
-    fn try_connect(&mut self) -> Result<bool, Error> {
-        match self.connect_result_queue.pop_front() {
-            Some(x) => x,
-            None => Ok(false),
-        }
     }
 
     fn drive(&mut self) -> Result<bool, Error> {
@@ -89,30 +80,6 @@ where
     fn flush(&mut self) -> Result<(), Error> {
         Ok(())
     }
-
-    fn close(&mut self) -> Result<(), Error> {
-        self.connected = false;
-        Ok(())
-    }
-}
-
-impl<R, W> TlsSession for MockSession<R, W>
-where
-    R: ?Sized + ToOwned + 'static,
-    W: ?Sized + ToOwned + 'static,
-    R::Owned: AsRef<R>,
-{
-    fn to_tls(
-        &mut self,
-        _domain: &str,
-        _config: tcp_stream::TLSConfig<'_, '_, '_>,
-    ) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn is_handshake_complete(&self) -> Result<bool, Error> {
-        Ok(true)
-    }
 }
 
 #[cfg(test)]
@@ -139,6 +106,7 @@ mod test {
         assert!(sess.write(&vec![2, 3]).is_ok());
 
         // pop user write
-        assert_eq!(sess.write_queue.pop_front().unwrap(), vec![2, 3])
+        assert_eq!(sess.write_queue.pop_front().unwrap(), vec![0, 1]);
+        assert_eq!(sess.write_queue.pop_front().unwrap(), vec![2, 3]);
     }
 }

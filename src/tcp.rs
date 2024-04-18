@@ -8,7 +8,14 @@ use std::{
 
 use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TLSConfig, TcpStream};
 
-use crate::{ReadStatus, Session, TlsSession, WriteStatus};
+use crate::{ReadStatus, Session, WriteStatus};
+
+/// Internal state machine of a TCP connection
+enum TcpConnection {
+    Connecting(TcpStream),
+    MidTlsHandshake(MidHandshakeTlsStream),
+    Connected(TcpStream),
+}
 
 /// A [`Session`] that encapsulates a [`TcpStream`].
 ///
@@ -16,105 +23,105 @@ use crate::{ReadStatus, Session, TlsSession, WriteStatus};
 /// Buffers will be returned as they are read from the underlying sockets.
 /// Writes may be partially completed, with the remaining slice returned as [`WriteStatus::Pending`].
 ///
-/// Once a client successfully connects, a plain TCP session can initiale a TLS handshake by calling [`TlsSession::to_tls`].
-/// The TLS handshake will be driven to completion by calling the [`Session::drive`] function.
-/// While a TLS handshake is in progress, calls to `read` and `write` will not be able to consume or produce data.
-pub struct StreamingTcpSession {
+/// A plain TCP session can be converted to a TLS session by initiating a TLS handshake via [`TcpSession::into_tls`].
+/// The TLS handshake is considered part of the connection process and will be driven to completion by calling the [`Session::drive`] function.
+/// While a TLS handshake is in progress, calls to [`Session::is_connected`] will return false and calls to `read` and `write` will fail.
+pub struct TcpSession {
     read_buffer: Vec<u8>,
-    stream: Option<TcpStream>,
-    mid_handshake: Option<MidHandshakeTlsStream>,
-    tls_handshake_complete: bool,
-    is_server_session: bool,
+    connection: Option<TcpConnection>,
 }
-impl StreamingTcpSession {
+impl TcpSession {
     /// You may wish to use the more convenient `connect(..)` function.
     ///
-    /// Create a new StreamingTcpSession with the given buffer length.
-    /// You may the underlying stream with `set_stream` or `with_stream`.
+    /// Create a new TcpSession with the given stream and a read buffer capacity of 4096.
     ///
     /// ```no_compile
-    /// let session = StreamingTcpSession::new(4096).with_stream(my_stream);
+    /// let session = TcpSession::new(my_stream);
     /// ````
-    pub fn new(read_buffer_len: usize) -> Self {
+    pub fn new(stream: TcpStream) -> Result<Self, Error> {
+        stream.set_nonblocking(true)?;
         let mut read_buffer = Vec::new();
-        read_buffer.resize(read_buffer_len, 0);
-        Self {
-            stream: None,
-            mid_handshake: None,
+        read_buffer.resize(4096, 0);
+        Ok(Self {
+            connection: if stream.is_connected() {
+                Some(TcpConnection::Connected(stream))
+            } else {
+                Some(TcpConnection::Connecting(stream))
+            },
             read_buffer,
-            tls_handshake_complete: false,
-            is_server_session: false,
+        })
+    }
+
+    /// Set the underlying read buffer capacity, which must be greater than or equal to the current read buffer length
+    pub fn with_read_buffer_capacity(mut self, read_buffer_capacity: usize) -> Result<Self, Error> {
+        if read_buffer_capacity < self.read_buffer.len() {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "new read buffer capacity must be greater than or equal to than current length",
+            ));
         }
+        self.read_buffer.resize(read_buffer_capacity, 0);
+        Ok(self)
     }
 
     /// Connect to the given socket address in nonblocking mode.
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, Error> {
-        Ok(Self::default()
-            .with_stream(TcpStream::Plain(std::net::TcpStream::connect(addr)?, true))
-            .with_nonblocking(true)?)
+        Self::new(TcpStream::Plain(std::net::TcpStream::connect(addr)?, true))
     }
 
-    /// Set the underlying stream
-    pub fn set_stream(&mut self, stream: TcpStream) {
-        self.stream = Some(stream);
-        self.mid_handshake = None;
+    /// Start the TLS handshake.
+    ///
+    /// While the TLS handshake is in progress, `is_connected` will return `false`.
+    /// The TLS handshake can be driven to completion by calling the [`Session::drive`] function
+    pub fn into_tls(mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<Self, Error> {
+        let stream = match self.connection.take() {
+            Some(TcpConnection::Connecting(x)) => x,
+            Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::MidTlsHandshake(_)) => {
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    "stream already mid-handshake",
+                ))
+            }
+            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
+        };
+        match stream.into_tls(domain, config) {
+            Ok(x) => {
+                self.connection = Some(TcpConnection::Connected(x));
+            }
+            Err(err) => match err {
+                HandshakeError::WouldBlock(x) => {
+                    self.connection = Some(TcpConnection::MidTlsHandshake(x));
+                }
+                HandshakeError::Failure(err) => return Err(err),
+            },
+        }
+        Ok(self)
     }
 
     /// Set nodelay on the underlying stream
     pub fn set_nodelay(&self, nodelay: bool) -> Result<(), Error> {
-        match &self.stream {
-            Some(x) => x.set_nodelay(nodelay),
-            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected").into()),
-        }
-    }
-
-    /// Set nonblocking on the underlying stream
-    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), Error> {
-        match &self.stream {
-            Some(x) => x.set_nonblocking(nonblocking),
-            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected").into()),
-        }
+        self.stream()?.set_nodelay(nodelay)
     }
 
     /// Set read_timeout on the underlying stream
     pub fn set_read_timeout(&self, read_timeout: Option<Duration>) -> Result<(), Error> {
-        match &self.stream {
-            Some(x) => x.set_read_timeout(read_timeout),
-            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected").into()),
-        }
+        self.stream()?.set_read_timeout(read_timeout)
     }
 
     /// Set ttl on the underlying stream
     pub fn set_ttl(&self, ttl: u32) -> Result<(), Error> {
-        match &self.stream {
-            Some(x) => x.set_ttl(ttl),
-            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected").into()),
-        }
+        self.stream()?.set_ttl(ttl)
     }
 
     /// Set write_timeout on the underlying stream
     pub fn set_write_timeout(&self, write_timeout: Option<Duration>) -> Result<(), Error> {
-        match &self.stream {
-            Some(x) => x.set_write_timeout(write_timeout),
-            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected").into()),
-        }
-    }
-
-    /// Set the underlying stream using a builder pattern
-    pub fn with_stream(mut self, stream: TcpStream) -> Self {
-        self.set_stream(stream);
-        self
+        self.stream()?.set_write_timeout(write_timeout)
     }
 
     /// Set nodelay on the underlying stream using a builder pattern
     pub fn with_nodelay(self, nodelay: bool) -> Result<Self, Error> {
         self.set_nodelay(nodelay)?;
-        Ok(self)
-    }
-
-    /// Set nonblocking on the underlying stream using a builder pattern
-    pub fn with_nonblocking(self, nonblocking: bool) -> Result<Self, Error> {
-        self.set_nonblocking(nonblocking)?;
         Ok(self)
     }
 
@@ -124,7 +131,7 @@ impl StreamingTcpSession {
         Ok(self)
     }
 
-    /// Set nonblocking on the underlying stream using a builder pattern
+    /// Set ttl on the underlying stream using a builder pattern
     pub fn with_ttl(self, ttl: u32) -> Result<Self, Error> {
         self.set_ttl(ttl)?;
         Ok(self)
@@ -136,63 +143,58 @@ impl StreamingTcpSession {
         Ok(self)
     }
 
-    /// Internal use
-    fn with_is_server_session(mut self, is_server_session: bool) -> Self {
-        self.is_server_session = is_server_session;
-        self
+    fn stream<'a>(&'a self) -> Result<&'a TcpStream, Error> {
+        match self.connection.as_ref() {
+            Some(TcpConnection::Connecting(x)) => Ok(x),
+            Some(TcpConnection::Connected(x)) => Ok(x),
+            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is mid-handshake",
+            )),
+            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
+        }
     }
 }
-impl Default for StreamingTcpSession {
-    fn default() -> Self {
-        Self::new(4096)
-    }
-}
-impl Session for StreamingTcpSession {
+impl Session for TcpSession {
     type ReadData<'a> = [u8];
     type WriteData<'a> = [u8];
 
     fn is_connected(&self) -> bool {
-        match &self.stream {
-            Some(x) => x.is_connected(),
-            None => self.mid_handshake.is_some(),
-        }
-    }
-
-    fn try_connect(&mut self) -> Result<bool, Error> {
-        match &mut self.stream {
-            Some(x) => x.try_connect(),
-            None => {
-                if self.mid_handshake.is_some() {
-                    Ok(true)
-                } else {
-                    Err(Error::new(ErrorKind::ConnectionReset, "undefined stream"))
-                }
-            }
+        match self.connection {
+            Some(TcpConnection::Connected(_)) => true,
+            _ => false,
         }
     }
 
     fn drive(&mut self) -> Result<bool, Error> {
-        if self.mid_handshake.is_some() {
-            let mid_handshake = match self.mid_handshake.take() {
-                Some(x) => x,
-                None => return Err(Error::new(ErrorKind::Other, "stream is not mid-handshake")),
-            };
-            match mid_handshake.handshake() {
+        match self.connection.take() {
+            Some(TcpConnection::Connected(x)) => {
+                self.connection = Some(TcpConnection::Connected(x));
+                Ok(false)
+            }
+            Some(TcpConnection::Connecting(mut x)) => {
+                if x.try_connect()? {
+                    self.connection = Some(TcpConnection::Connected(x));
+                    Ok(true)
+                } else {
+                    self.connection = Some(TcpConnection::Connecting(x));
+                    Ok(false)
+                }
+            }
+            Some(TcpConnection::MidTlsHandshake(x)) => match x.handshake() {
                 Ok(x) => {
-                    self.stream = Some(x);
-                    self.tls_handshake_complete = true;
+                    self.connection = Some(TcpConnection::Connected(x));
                     Ok(true)
                 }
                 Err(err) => match err {
                     HandshakeError::WouldBlock(x) => {
-                        self.mid_handshake = Some(x);
+                        self.connection = Some(TcpConnection::MidTlsHandshake(x));
                         Ok(false)
                     }
                     HandshakeError::Failure(err) => Err(err),
                 },
-            }
-        } else {
-            Ok(false)
+            },
+            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         }
     }
 
@@ -200,20 +202,21 @@ impl Session for StreamingTcpSession {
         &mut self,
         data: &'a Self::WriteData<'a>,
     ) -> Result<WriteStatus<'a, Self::WriteData<'a>>, Error> {
+        let stream = match self.connection.as_mut() {
+            Some(TcpConnection::Connecting(x)) => x,
+            Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::MidTlsHandshake(_)) => {
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    "stream is mid-handshake",
+                ))
+            }
+            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
+        };
         if data.is_empty() {
             // nothing to write, nothing to do
             return Ok(WriteStatus::Success);
         }
-        let stream = match &mut self.stream {
-            Some(x) => x,
-            None => {
-                if self.mid_handshake.is_some() {
-                    return Ok(WriteStatus::Pending(data));
-                } else {
-                    return Err(Error::new(ErrorKind::NotConnected, "stream not connected").into());
-                }
-            }
-        };
         let wrote = match stream.write(data) {
             Ok(0) => {
                 // per rust docs: A return value of 0 typically means that the underlying object is no longer
@@ -238,15 +241,16 @@ impl Session for StreamingTcpSession {
     }
 
     fn read<'a>(&'a mut self) -> Result<ReadStatus<'a, Self::ReadData<'a>>, Error> {
-        let stream = match &mut self.stream {
-            Some(x) => x,
-            None => {
-                if self.mid_handshake.is_some() {
-                    return Ok(ReadStatus::None);
-                } else {
-                    return Err(Error::new(ErrorKind::NotConnected, "stream not connected").into());
-                }
+        let stream = match self.connection.as_mut() {
+            Some(TcpConnection::Connecting(x)) => x,
+            Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::MidTlsHandshake(_)) => {
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    "stream is mid-handshake",
+                ))
             }
+            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         };
         let read = match stream.read(self.read_buffer.as_mut_slice()) {
             Ok(x) => x,
@@ -265,51 +269,22 @@ impl Session for StreamingTcpSession {
     }
 
     fn flush(&mut self) -> Result<(), Error> {
-        match &mut self.stream {
-            None => Ok(()),
-            Some(stream) => stream.flush(),
-        }
-    }
-
-    fn close(&mut self) -> Result<(), Error> {
-        self.stream = None;
-        Ok(())
-    }
-}
-impl TlsSession for StreamingTcpSession {
-    fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error> {
-        if self.is_server_session {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "to_tls is only supported for client connections",
-            ));
-        }
-        let stream = match self.stream.take() {
-            Some(x) => x,
+        let stream = match self.connection.as_mut() {
+            Some(TcpConnection::Connecting(x)) => x,
+            Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::MidTlsHandshake(_)) => {
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    "stream is mid-handshake",
+                ))
+            }
             None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         };
-        match stream.into_tls(domain, config) {
-            Ok(x) => {
-                self.stream = Some(x);
-                self.tls_handshake_complete = true;
-                Ok(())
-            }
-            Err(err) => match err {
-                HandshakeError::WouldBlock(x) => {
-                    self.mid_handshake = Some(x);
-                    Ok(())
-                }
-                HandshakeError::Failure(err) => Err(err),
-            },
-        }
-    }
-
-    fn is_handshake_complete(&self) -> Result<bool, Error> {
-        Ok(self.tls_handshake_complete)
+        stream.flush()
     }
 }
 
-/// A TcpServer, which produces connected, nonblocking [`StreamingTcpSession`] on calling `accept`.
+/// A TcpServer, which produces connected, nonblocking [`TcpSession`] on calling `accept`.
 pub struct TcpServer {
     listener: TcpListener,
 }
@@ -349,7 +324,7 @@ impl TcpServer {
     }
 
     /// Accept a new TCP Session, immediately returning None in nonblocking mode if there are no new sessions.
-    pub fn accept(&self) -> Result<Option<(StreamingTcpSession, SocketAddr)>, Error> {
+    pub fn accept(&self) -> Result<Option<(TcpSession, SocketAddr)>, Error> {
         let (stream, addr) = match self.listener.accept() {
             Ok(v) => v,
             Err(err) => match err.kind() {
@@ -358,10 +333,7 @@ impl TcpServer {
             },
         };
         Ok(Some((
-            StreamingTcpSession::default()
-                .with_stream(TcpStream::Plain(stream, true))
-                .with_is_server_session(true)
-                .with_nonblocking(true)?,
+            TcpSession::new(TcpStream::Plain(stream, true))?,
             addr,
         )))
     }

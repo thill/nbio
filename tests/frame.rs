@@ -1,6 +1,6 @@
 use nbio::{
     frame::{FramingSession, U64FramingStrategy},
-    tcp::{StreamingTcpSession, TcpServer},
+    tcp::{TcpServer, TcpSession},
     ReadStatus, Session, WriteStatus,
 };
 
@@ -8,17 +8,8 @@ use nbio::{
 fn one_small_frame() {
     // create server, connect client, establish server session
     let server = TcpServer::bind("127.0.0.1:34001").unwrap();
-    let client = StreamingTcpSession::connect("127.0.0.1:34001")
-        .unwrap()
-        .with_nonblocking(true)
-        .unwrap();
-    let session = server
-        .accept()
-        .unwrap()
-        .unwrap()
-        .0
-        .with_nonblocking(true)
-        .unwrap();
+    let client = TcpSession::connect("127.0.0.1:34001").unwrap();
+    let session = server.accept().unwrap().unwrap().0;
 
     let mut client = FramingSession::new(client, U64FramingStrategy::new(), 1024);
     let mut session = FramingSession::new(session, U64FramingStrategy::new(), 1024);
@@ -58,17 +49,8 @@ fn one_small_frame() {
 fn one_large_frame() {
     // create server, connect client, establish server session
     let server = TcpServer::bind("127.0.0.1:34002").unwrap();
-    let client = StreamingTcpSession::connect("127.0.0.1:34002")
-        .unwrap()
-        .with_nonblocking(true)
-        .unwrap();
-    let session = server
-        .accept()
-        .unwrap()
-        .unwrap()
-        .0
-        .with_nonblocking(true)
-        .unwrap();
+    let client = TcpSession::connect("127.0.0.1:34002").unwrap();
+    let session = server.accept().unwrap().unwrap().0;
 
     let mut client = FramingSession::new(client, U64FramingStrategy::new(), 1024);
     let mut session = FramingSession::new(session, U64FramingStrategy::new(), 1024);
@@ -107,17 +89,8 @@ fn one_large_frame() {
 fn framing_slow_consumer() {
     // create server, connect client, establish server session
     let server = TcpServer::bind("127.0.0.1:34003").unwrap();
-    let client = StreamingTcpSession::connect("127.0.0.1:34003")
-        .unwrap()
-        .with_nonblocking(true)
-        .unwrap();
-    let session = server
-        .accept()
-        .unwrap()
-        .unwrap()
-        .0
-        .with_nonblocking(true)
-        .unwrap();
+    let client = TcpSession::connect("127.0.0.1:34003").unwrap();
+    let session = server.accept().unwrap().unwrap().0;
 
     // use a small write buffer to stress test
     let mut client = FramingSession::new(client, U64FramingStrategy::new(), 1024);

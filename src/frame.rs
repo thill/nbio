@@ -8,7 +8,7 @@ use std::{
     mem::swap,
 };
 
-use crate::{internal::GrowableCircleBuf, ReadStatus, Session, TlsSession, WriteStatus};
+use crate::{internal::GrowableCircleBuf, ReadStatus, Session, WriteStatus};
 
 /// # Framing Session
 ///
@@ -81,10 +81,6 @@ where
         self.session.is_connected()
     }
 
-    fn try_connect(&mut self) -> Result<bool, Error> {
-        self.session.try_connect()
-    }
-
     fn drive(&mut self) -> Result<bool, std::io::Error> {
         self.session.drive()?;
         if self.write_buffer.is_empty() {
@@ -146,27 +142,6 @@ where
             self.drive()?;
         }
         self.session.flush()
-    }
-
-    fn close(&mut self) -> Result<(), Error> {
-        self.session.close()
-    }
-}
-impl<S, F> TlsSession for FramingSession<S, F>
-where
-    S: for<'a> TlsSession<ReadData<'a> = [u8], WriteData<'a> = [u8]> + 'static,
-    F: FramingStrategy + 'static,
-{
-    fn to_tls(
-        &mut self,
-        domain: &str,
-        config: tcp_stream::TLSConfig<'_, '_, '_>,
-    ) -> Result<(), std::io::Error> {
-        self.session.to_tls(domain, config)
-    }
-
-    fn is_handshake_complete(&self) -> Result<bool, Error> {
-        self.session.is_handshake_complete()
     }
 }
 

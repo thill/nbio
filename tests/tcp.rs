@@ -1,15 +1,15 @@
 use tcp_stream::TLSConfig;
 
 use nbio::{
-    tcp::{StreamingTcpSession, TcpServer},
-    ReadStatus, Session, TlsSession, WriteStatus,
+    tcp::{TcpServer, TcpSession},
+    ReadStatus, Session, WriteStatus,
 };
 
 #[test]
 pub fn tcp_client_server() {
     // create server, connect client, establish server session
     let server = TcpServer::bind("127.0.0.1:33001").unwrap();
-    let mut client = StreamingTcpSession::connect("127.0.0.1:33001").unwrap();
+    let mut client = TcpSession::connect("127.0.0.1:33001").unwrap();
     let mut session = None;
     while let None = session {
         session = server.accept().unwrap().map(|(s, _)| s);
@@ -46,13 +46,15 @@ pub fn tcp_client_server() {
 
 #[test]
 pub fn tcp_tls() {
-    // create client
-    let mut client = StreamingTcpSession::connect("www.google.com:443").unwrap();
-
-    // handshake
-    client
-        .to_tls("www.google.com", TLSConfig::default())
+    // tls client
+    let mut client = TcpSession::connect("www.google.com:443")
+        .unwrap()
+        .into_tls("www.google.com", TLSConfig::default())
         .unwrap();
+
+    while !client.is_connected() {
+        client.drive().unwrap();
+    }
 
     // send request
     let request = "GET / HTTP/1.1\r\nhost: www.google.com\r\n\r\n"
@@ -79,7 +81,7 @@ pub fn tcp_tls() {
 pub fn tcp_slow_consumer() {
     // create server, connect client, establish server session
     let server = TcpServer::bind("127.0.0.1:33002").unwrap();
-    let mut client = StreamingTcpSession::connect("127.0.0.1:33002").unwrap();
+    let mut client = TcpSession::connect("127.0.0.1:33002").unwrap();
     let mut session = server.accept().unwrap().unwrap().0;
 
     // send 100,000 messages with client while "slowly" reading with session

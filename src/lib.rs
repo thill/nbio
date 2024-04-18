@@ -32,10 +32,10 @@
 //!
 //! ```no_run
 //! use nbio::{ReadStatus, Session, WriteStatus};
-//! use nbio::tcp::StreamingTcpSession;
+//! use nbio::tcp::TcpSession;
 //!
 //! // establish connection
-//! let mut client = StreamingTcpSession::connect("192.168.123.456:54321").unwrap();
+//! let mut client = TcpSession::connect("192.168.123.456:54321").unwrap();
 //!
 //! // send some bytes until completion
 //! let mut remaining_write = "hello world!".as_bytes();
@@ -59,11 +59,11 @@
 //!
 //! ```no_run
 //! use nbio::{ReadStatus, Session, WriteStatus};
-//! use nbio::tcp::StreamingTcpSession;
+//! use nbio::tcp::TcpSession;
 //! use nbio::frame::{FramingSession, U64FramingStrategy};
 //!
 //! // establish connection wrapped in a framing session
-//! let client = StreamingTcpSession::connect("192.168.123.456:54321").unwrap();
+//! let client = TcpSession::connect("192.168.123.456:54321").unwrap();
 //! let mut client = FramingSession::new(client, U64FramingStrategy::new(), 4096);
 //!
 //! // send some bytes until completion
@@ -94,7 +94,7 @@
 //! use tcp_stream::OwnedTLSConfig;
 //!
 //! // create the client and make the request
-//! let mut client = HttpClient::new(OwnedTLSConfig::default());
+//! let mut client = HttpClient::new();
 //! let mut conn = client
 //!     .request(Request::get("http://icanhazip.com").body(()).unwrap())
 //!     .unwrap();
@@ -123,14 +123,13 @@ mod internal;
 
 use std::io::Error;
 
-use tcp_stream::TLSConfig;
-
 /// A bi-directional connection supporting generic read and write events.
 ///
 /// ## Connecting
 ///
-/// Some implementations may not default to a connected state.
-/// The `is_connected` and `try_connect` functions can drive the session to a connected state.
+/// Some implementations may not default to a connected state, in which case immediate calls to `read()` and `write()` will fail.
+/// The `is_connected` function provides the connection status, which also checks to make sure any required handshakes are also completed.
+/// When `is_connected` returns false, you may drive the connection process via the [`Session::drive()`] function.
 ///
 /// ## Retrying
 ///
@@ -139,6 +138,9 @@ use tcp_stream::TLSConfig;
 /// See [`ReadStatus`] and [`WriteStatus`] for more details.
 ///
 /// ## Duty Cycles
+///
+/// The `drive(..)` operation is used to finish connecting and to service reading or writing buffered data.
+/// Some [`Session`] implementations will require periodic calls to `drive(..)` in order to function.
 pub trait Session {
     /// The type returned by the `write(..)` function.
     type WriteData<'a>: ?Sized
@@ -151,12 +153,8 @@ pub trait Session {
         Self: 'a;
 
     /// Check if the session is connected.
-    /// If this returns false, use `try_connect(..)` to drive the connection process.
+    /// If this returns false, use `drive(..)` to progress the connection process.
     fn is_connected(&self) -> bool;
-
-    /// Attempt to drive the connection to an established state.
-    /// This will return true when the connection is established.
-    fn try_connect(&mut self) -> Result<bool, Error>;
 
     /// Some implementations will internally buffer messages.
     /// Those implementations will require `drive(..)` to be called continuously to completely read and/or write data.
@@ -179,22 +177,6 @@ pub trait Session {
 
     /// Flush all pending write data, blocking until completion.
     fn flush(&mut self) -> Result<(), Error>;
-
-    /// Close the session, causing all future calls to `drive`, `write`, and `read` to return `Err`.
-    fn close(&mut self) -> Result<(), Error>;
-}
-
-/// Optionally implemented for [`Session`] implementations that support TLS
-pub trait TlsSession: Session {
-    /// Call this once to transition a connection into TLS mode.
-    /// This will return true if the TLS handshake is immediately succesful, or false otherwise.
-    ///
-    /// Calls to `drive(..)`` will run the TLS handshake to completion.
-    /// While the handshake is in progress, reads and writes will stall, reporting `Pending`/`None`.
-    fn to_tls(&mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<(), Error>;
-
-    /// Check if the `to_tls` handshake is complete.
-    fn is_handshake_complete(&self) -> Result<bool, Error>;
 }
 
 /// Returned by the [`Session`] read function, providing the outcome or information about the read action.
