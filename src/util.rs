@@ -52,8 +52,12 @@ where
     type ReadData<'a> = S::ReadData<'a>;
     type WriteData<'a> = S::WriteData<'a>;
 
-    fn is_connected(&self) -> bool {
-        self.session.is_connected()
+    fn status(&self) -> crate::ConnectionStatus {
+        self.session.status()
+    }
+
+    fn close(&mut self) {
+        self.session.close()
     }
 
     fn drive(&mut self) -> Result<bool, std::io::Error> {
@@ -137,8 +141,12 @@ where
     type ReadData<'a> = S::ReadData<'a>;
     type WriteData<'a> = S::WriteData<'a>;
 
-    fn is_connected(&self) -> bool {
-        self.session.is_connected()
+    fn status(&self) -> crate::ConnectionStatus {
+        self.session.status()
+    }
+
+    fn close(&mut self) {
+        self.session.close()
     }
 
     fn drive(&mut self) -> Result<bool, std::io::Error> {

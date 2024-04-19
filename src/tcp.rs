@@ -8,7 +8,7 @@ use std::{
 
 use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TLSConfig, TcpStream};
 
-use crate::{ReadStatus, Session, WriteStatus};
+use crate::{ConnectionStatus, ReadStatus, Session, WriteStatus};
 
 /// Internal state machine of a TCP connection
 enum TcpConnection {
@@ -25,7 +25,7 @@ enum TcpConnection {
 ///
 /// A plain TCP session can be converted to a TLS session by initiating a TLS handshake via [`TcpSession::into_tls`].
 /// The TLS handshake is considered part of the connection process and will be driven to completion by calling the [`Session::drive`] function.
-/// While a TLS handshake is in progress, calls to [`Session::is_connected`] will return false and calls to `read` and `write` will fail.
+/// While a TLS handshake is in progress, calls to [`Session::status`] will return [`ConnectionStatus::Connecting`] and calls to `read` and `write` will fail.
 pub struct TcpSession {
     read_buffer: Vec<u8>,
     connection: Option<TcpConnection>,
@@ -71,7 +71,7 @@ impl TcpSession {
 
     /// Start the TLS handshake.
     ///
-    /// While the TLS handshake is in progress, `is_connected` will return `false`.
+    /// While the TLS handshake is in progress, [`Session::status`] will return [`ConnectionStatus::Connecting`].
     /// The TLS handshake can be driven to completion by calling the [`Session::drive`] function
     pub fn into_tls(mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<Self, Error> {
         let stream = match self.connection.take() {
@@ -159,11 +159,18 @@ impl Session for TcpSession {
     type ReadData<'a> = &'a [u8];
     type WriteData<'a> = &'a [u8];
 
-    fn is_connected(&self) -> bool {
-        match self.connection {
-            Some(TcpConnection::Connected(_)) => true,
-            _ => false,
+    fn status(&self) -> ConnectionStatus {
+        match &self.connection {
+            None => ConnectionStatus::Closed,
+            Some(TcpConnection::Connected(_)) => ConnectionStatus::Connected,
+            Some(TcpConnection::Connecting(_)) | Some(TcpConnection::MidTlsHandshake(_)) => {
+                ConnectionStatus::Connecting
+            }
         }
+    }
+
+    fn close(&mut self) {
+        self.connection = None
     }
 
     fn drive(&mut self) -> Result<bool, Error> {
@@ -191,7 +198,10 @@ impl Session for TcpSession {
                         self.connection = Some(TcpConnection::MidTlsHandshake(x));
                         Ok(false)
                     }
-                    HandshakeError::Failure(err) => Err(err),
+                    HandshakeError::Failure(err) => {
+                        self.connection = None;
+                        Err(err)
+                    }
                 },
             },
             None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
@@ -222,6 +232,7 @@ impl Session for TcpSession {
                 // per rust docs: A return value of 0 typically means that the underlying object is no longer
                 // able to accept bytes and will likely not be able to in the future as well, or that the buffer
                 // provided is empty.
+                self.connection = None;
                 return Err(Error::new(
                     ErrorKind::UnexpectedEof,
                     "stream underlying write returned 0 instead of WouldBlock",
@@ -230,7 +241,10 @@ impl Session for TcpSession {
             Ok(x) => x,
             Err(err) => match err.kind() {
                 ErrorKind::WouldBlock => 0,
-                _ => return Err(err.into()),
+                _ => {
+                    self.connection = None;
+                    return Err(err.into());
+                }
             },
         };
         if wrote == data.len() {
@@ -256,7 +270,10 @@ impl Session for TcpSession {
             Ok(x) => x,
             Err(err) => match err.kind() {
                 ErrorKind::WouldBlock => 0,
-                _ => return Err(err.into()),
+                _ => {
+                    self.connection = None;
+                    return Err(err.into());
+                }
             },
         };
         if read == 0 {
@@ -270,8 +287,10 @@ impl Session for TcpSession {
 
     fn flush(&mut self) -> Result<(), Error> {
         let stream = match self.connection.as_mut() {
-            Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::Connecting(_)) => {
+                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
+            }
             Some(TcpConnection::MidTlsHandshake(_)) => {
                 return Err(Error::new(
                     ErrorKind::NotConnected,

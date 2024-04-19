@@ -1,8 +1,11 @@
 //! Mock sessions, most useful for testing
 
-use std::{collections::VecDeque, io::Error};
+use std::{
+    collections::VecDeque,
+    io::{Error, ErrorKind},
+};
 
-use crate::{ReadStatus, Session, WriteStatus};
+use crate::{ConnectionStatus, ReadStatus, Session, WriteStatus};
 
 /// A mock session, using internal [`VecDeque`] instances to drive results returned on function calls.
 ///
@@ -12,7 +15,7 @@ use crate::{ReadStatus, Session, WriteStatus};
 /// When the `write_result_queue` is empty, the write will return `Success` and be pushed to the internal `write_queue`.
 /// When the `read_result_queue`, `connect_result_queue`, or `drive_result_queue` are empty, their respective function will return `None` or `false`.
 pub struct MockSession<R, W> {
-    pub connected: bool,
+    pub status: ConnectionStatus,
     pub drive_result_queue: VecDeque<Result<bool, Error>>,
     pub read_queue: VecDeque<R>,
     pub write_queue: VecDeque<W>,
@@ -24,7 +27,7 @@ where
 {
     pub fn new() -> Self {
         Self {
-            connected: true,
+            status: ConnectionStatus::Connected,
             drive_result_queue: VecDeque::new(),
             read_queue: VecDeque::new(),
             write_queue: VecDeque::new(),
@@ -39,11 +42,18 @@ where
     type ReadData<'a> = R;
     type WriteData<'a> = W;
 
-    fn is_connected(&self) -> bool {
-        self.connected
+    fn status(&self) -> ConnectionStatus {
+        self.status
+    }
+
+    fn close(&mut self) {
+        self.status = ConnectionStatus::Closed
     }
 
     fn drive(&mut self) -> Result<bool, Error> {
+        if self.status == ConnectionStatus::Closed {
+            return Err(Error::new(ErrorKind::NotConnected, "closed"));
+        }
         match self.drive_result_queue.pop_front() {
             Some(x) => x,
             None => Ok(false),
@@ -54,11 +64,17 @@ where
         &mut self,
         data: Self::WriteData<'a>,
     ) -> Result<crate::WriteStatus<Self::WriteData<'a>>, Error> {
+        if self.status != ConnectionStatus::Connected {
+            return Err(Error::new(ErrorKind::NotConnected, "not connected"));
+        }
         self.write_queue.push_back(data);
         Ok(WriteStatus::Success)
     }
 
     fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, Error> {
+        if self.status != ConnectionStatus::Connected {
+            return Err(Error::new(ErrorKind::NotConnected, "not connected"));
+        }
         match self.read_queue.pop_front() {
             None => Ok(ReadStatus::None),
             Some(x) => Ok(ReadStatus::Data(x)),

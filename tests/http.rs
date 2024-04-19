@@ -70,7 +70,8 @@ fn test_keep_alive() {
     conn.write(
         Request::get("http://icanhazip.com")
             .body(Vec::new())
-            .unwrap(),
+            .unwrap()
+            .into(),
     )
     .unwrap();
 

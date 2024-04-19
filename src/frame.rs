@@ -8,7 +8,7 @@ use std::{
     mem::swap,
 };
 
-use crate::{internal::GrowableCircleBuf, ReadStatus, Session, WriteStatus};
+use crate::{buffer::GrowableCircleBuf, ConnectionStatus, ReadStatus, Session, WriteStatus};
 
 /// # Framing Session
 ///
@@ -77,8 +77,12 @@ where
     type ReadData<'a> = F::ReadFrame<'a>;
     type WriteData<'a> = F::WriteFrame<'a>;
 
-    fn is_connected(&self) -> bool {
-        self.session.is_connected()
+    fn status(&self) -> crate::ConnectionStatus {
+        self.session.status()
+    }
+
+    fn close(&mut self) {
+        self.session.close()
     }
 
     fn drive(&mut self) -> Result<bool, std::io::Error> {
@@ -99,18 +103,14 @@ where
         &mut self,
         frame: Self::WriteData<'a>,
     ) -> Result<WriteStatus<Self::WriteData<'a>>, Error> {
-        if !self.session.is_connected() {
+        if self.session.status() != ConnectionStatus::Connected {
             return Err(Error::new(
                 ErrorKind::NotConnected,
                 "underlying session is not connected",
             ));
         }
-        let data = self.framing_strategy.serialize_frame(&frame)?;
-        if self.write_buffer.try_write(&data)? {
-            Ok(WriteStatus::Success)
-        } else {
-            Ok(WriteStatus::Pending(frame))
-        }
+        self.framing_strategy
+            .write_frame(frame, &mut self.write_buffer)
     }
 
     fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, std::io::Error> {
@@ -191,17 +191,15 @@ pub trait FramingStrategy {
         data: &'a [u8],
     ) -> Result<DeserializedFrame<Self::ReadFrame<'a>>, Error>;
 
-    /// Serialize the given frame, returning a `Vec<&[u8]>` representing the serialized frame.
-    ///
-    /// A `Vec<&[u8]> is used instead of a single `&[u8]` to allow for zero-copy of simple framing protocol.
-    /// For example, [`U64FramingStrategy`]
+    /// Serialize and write the given frame to the given [`GrowableCircleBuf`], returning the appropriate WriteStatus.
     ///
     /// The lifetime of the returned data is bound to `&self`.
     /// This allows the `FramingStrategy` to parse data to an internal field and return the reference.
-    fn serialize_frame<'a, 'b>(
-        &'a mut self,
-        data: &'a Self::WriteFrame<'b>,
-    ) -> Result<Vec<&'a [u8]>, Error>;
+    fn write_frame<'a>(
+        &mut self,
+        frame: Self::WriteFrame<'a>,
+        buffer: &mut GrowableCircleBuf,
+    ) -> Result<WriteStatus<Self::WriteFrame<'a>>, Error>;
 }
 
 /// Returns the parsed and total deserialized size frame for [`FramingStrategy`] `deserialize_frame`.
@@ -227,17 +225,19 @@ impl U64FramingStrategy {
 impl FramingStrategy for U64FramingStrategy {
     type ReadFrame<'a> = &'a [u8];
     type WriteFrame<'a> = &'a [u8];
-    fn serialize_frame<'a, 'b>(
-        &'a mut self,
-        data: &'a Self::ReadFrame<'b>,
-    ) -> Result<Vec<&'a [u8]>, Error> {
+    fn write_frame<'a>(
+        &mut self,
+        data: Self::WriteFrame<'a>,
+        write_buffer: &mut GrowableCircleBuf,
+    ) -> Result<WriteStatus<Self::WriteFrame<'a>>, Error> {
         let len = u64::try_from(data.len())
             .map_err(|_| Error::new(ErrorKind::InvalidData, "frame to serialize exceeds u64"))?;
         self.header.copy_from_slice(&len.to_le_bytes());
-        let mut buffers = Vec::new();
-        buffers.push(self.header.as_slice());
-        buffers.push(data);
-        Ok(buffers)
+        if write_buffer.try_write(&vec![self.header.as_slice(), data])? {
+            Ok(WriteStatus::Success)
+        } else {
+            Ok(WriteStatus::Pending(data))
+        }
     }
 
     fn check_deserialize_frame(&mut self, data: &[u8], _eof: bool) -> Result<bool, Error> {
@@ -258,7 +258,7 @@ impl FramingStrategy for U64FramingStrategy {
     fn deserialize_frame<'a>(
         &'a mut self,
         data: &'a [u8],
-    ) -> Result<DeserializedFrame<Self::WriteFrame<'a>>, Error> {
+    ) -> Result<DeserializedFrame<Self::ReadFrame<'a>>, Error> {
         if data.len() < 8 {
             return Err(Error::new(
                 ErrorKind::InvalidData,

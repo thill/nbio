@@ -114,7 +114,10 @@
 pub extern crate http as hyperium_http;
 #[cfg(all(feature = "tcp"))]
 pub extern crate tcp_stream;
+#[cfg(all(feature = "websocket"))]
+pub extern crate tungstenite;
 
+pub mod buffer;
 pub mod frame;
 #[cfg(all(feature = "http"))]
 pub mod http;
@@ -122,18 +125,18 @@ pub mod mock;
 #[cfg(all(feature = "tcp"))]
 pub mod tcp;
 pub mod util;
+#[cfg(all(feature = "websocket"))]
+pub mod websocket;
 
-mod internal;
-
-use std::io::Error;
+use std::{fmt::Debug, io::Error};
 
 /// A bi-directional connection supporting generic read and write events.
 ///
 /// ## Connecting
 ///
 /// Some implementations may not default to a connected state, in which case immediate calls to `read()` and `write()` will fail.
-/// The `is_connected` function provides the connection status, which also checks to make sure any required handshakes are also completed.
-/// When `is_connected` returns false, you may drive the connection process via the [`Session::drive()`] function.
+/// The [`Session::status`] function provides the connection status, which also checks to make sure any required handshakes are also completed.
+/// When [`Session::status`] returns [`ConnectionStatus::Connecting`], you may drive the connection process via the [`Session::drive()`] function.
 ///
 /// ## Retrying
 ///
@@ -157,8 +160,12 @@ pub trait Session {
         Self: 'a;
 
     /// Check if the session is connected.
-    /// If this returns false, use `drive(..)` to progress the connection process.
-    fn is_connected(&self) -> bool;
+    ///
+    /// If this returns [`ConnectionStatus::Connecting`], use [`Session::drive`] to progress the connection process.
+    fn status(&self) -> ConnectionStatus;
+
+    /// Force the connection to move to a [`ConnectionStatus::Closed`] state immediately
+    fn close(&mut self);
 
     /// Some implementations will internally buffer messages.
     /// Those implementations will require `drive(..)` to be called continuously to completely read and/or write data.
@@ -183,7 +190,18 @@ pub trait Session {
     fn flush(&mut self) -> Result<(), Error>;
 }
 
-/// Returned by the [`Session`] read function, providing the outcome or information about the read action.
+/// Returned by the [`Session::state`] function, providing the current connection state
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectionStatus {
+    /// Session attempting to connect or handshake, and will move to `Connected` or `Closed` as [`Session::drive`] is called.
+    Connecting,
+    /// Session is currently connected, and will move `Closed` when an unrecoverable error is encountered
+    Connected,
+    /// Session terminal state, connection has been closed
+    Closed,
+}
+
+/// Returned by the [`Session::read`] function, providing the outcome or information about the read action.
 ///
 /// The generic type `T` will match the cooresponding [`Session::ReadData`].
 pub enum ReadStatus<T> {
@@ -196,8 +214,26 @@ pub enum ReadStatus<T> {
     /// No work was done. This is useful to signal to a scheduler or idle strategy that it may be time to yield.
     None,
 }
+impl<T: Debug> Debug for ReadStatus<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadStatus::Data(x) => f.write_str(&format!("ReadStatus::Data({x:?})")),
+            ReadStatus::Buffered => f.write_str("ReadStatus::Buffered"),
+            ReadStatus::None => f.write_str("ReadStatus::None"),
+        }
+    }
+}
+impl<T: Clone> Clone for ReadStatus<T> {
+    fn clone(&self) -> Self {
+        match self {
+            ReadStatus::Data(x) => ReadStatus::Data(x.clone()),
+            ReadStatus::Buffered => ReadStatus::Buffered,
+            ReadStatus::None => ReadStatus::None,
+        }
+    }
+}
 
-/// Returned by the [`Session`] write function, providing the outcome of the write action.
+/// Returned by the [`Session::write`] function, providing the outcome of the write action.
 ///
 /// The generic type `T` will match the cooresponding [`Session::ReadData`].
 pub enum WriteStatus<T> {
@@ -213,4 +249,20 @@ pub enum WriteStatus<T> {
     /// reference back into the `write` function for another attempt, but it is only **sometimes** appropriate to return the entire
     /// original write reference into the `write` function for a second attempt.
     Pending(T),
+}
+impl<T: Debug> Debug for WriteStatus<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteStatus::Success => f.write_str("WriteStatus::Success"),
+            WriteStatus::Pending(x) => f.write_str(&format!("WriteStatus::Pending({x:?})")),
+        }
+    }
+}
+impl<T: Clone> Clone for WriteStatus<T> {
+    fn clone(&self) -> Self {
+        match self {
+            WriteStatus::Success => WriteStatus::Success,
+            WriteStatus::Pending(x) => WriteStatus::Pending(x.clone()),
+        }
+    }
 }

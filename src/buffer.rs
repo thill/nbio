@@ -4,12 +4,14 @@ use std::io::{Error, ErrorKind, Write};
 
 use circbuf::CircBuf;
 
+/// A circular buffer that will automatically grow when empty to temporarily fit a payload greater than the capacity
 pub struct GrowableCircleBuf {
     circbuf: CircBuf,
     one_time_buffer: Vec<u8>,
     one_time_offset: usize,
 }
 impl GrowableCircleBuf {
+    /// create a new buffer with the given capacity
     pub fn new(capacity: usize) -> Result<Self, Error> {
         Ok(Self {
             circbuf: CircBuf::with_capacity(capacity)

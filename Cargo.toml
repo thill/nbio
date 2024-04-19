@@ -11,9 +11,10 @@ categories = ["rust-patterns"]
 exclude = ["Cargo.lock"]
 
 [features]
-default = ["http", "tcp"]
+default = ["http", "tcp", "websocket"]
 http = ["tcp", "dep:chunked_transfer", "dep:http", "dep:httparse"]
 tcp = ["dep:tcp-stream"]
+websocket = ["http", "tcp", "dep:tungstenite"]
 
 [dependencies]
 chunked_transfer = { version = "1.4.1", optional = true }
@@ -21,3 +22,4 @@ circbuf = "0.2.1"
 http = { version = "0.2.9", optional = true }
 httparse = { version = "1.8.0", optional = true }
 tcp-stream = { version = "0.26.1", optional = true }
+tungstenite = { version = "0.21.0", optional = true }

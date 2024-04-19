@@ -9,15 +9,45 @@ use hyperium_http::{
     header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
     Response,
 };
-use tcp_stream::OwnedTLSConfig;
+use tcp_stream::{OwnedTLSConfig, TLSConfig, TcpStream};
 
 use crate::{
+    buffer::GrowableCircleBuf,
     frame::{DeserializedFrame, FramingSession, FramingStrategy},
     tcp::TcpSession,
-    Session, WriteStatus,
+    ConnectionStatus, Session, WriteStatus,
 };
 
-/// A simple non-blocking HTTP 1.1 client
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Scheme {
+    Http,
+    Https,
+}
+impl Scheme {
+    pub fn default_port(&self) -> u16 {
+        match self {
+            Self::Http => 80,
+            Self::Https => 443,
+        }
+    }
+}
+
+/// An HTTP Request, which can be represented by a [`hyperium_http::Request`] or a serialized HTTP payload.
+///
+/// [`HttpRequest::Serialized`] is utilized to prevent needing to serialize a payload more than one time in
+/// the event it needs to be retried due to back-pressure.
+pub enum HttpRequest {
+    Request(hyperium_http::Request<Vec<u8>>),
+    Serialized(Vec<u8>),
+}
+impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
+    fn from(value: hyperium_http::Request<I>) -> Self {
+        let (parts, body) = value.into_parts();
+        HttpRequest::Request(hyperium_http::Request::from_parts(parts, body.into_body()))
+    }
+}
+
+/// A simple non-blocking HTTP 1.x client
 ///
 /// Calling `connect(..)` or `request(..)` will return a [`HttpClientSession`], which encapsulates a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
 /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
@@ -26,15 +56,15 @@ use crate::{
 /// Calls to `drive(..)` will perform the TLS handshake and flush the pending request.
 /// Calls to `read(..)` will buffer the response, and return a deserialized [`hyperium_http::Response`].
 ///
-/// For now, this only supports HTTP 1.1.
+/// For now, this only supports HTTP 1.x.
 ///
 /// ## Functions
 ///
 /// [`HttpClient::request`] will open a [`HttpClientSession`] for the given [`hyperium_http::Request`], buffering the request, which can be driven and read to completion.
 /// To open a connection without an immeidate pending [`hyperium_http::Request`], use [`HttpClient::connect`], which simply opens a persistent connection.
 ///
-/// [`HttpClient::connect`] will open a persistent [`HttpClientSession`] to the given domain. This connection must call [`Session::drive()`] until [`Session::is_connected`]
-/// returns `true`, at which point the session can send multiple [`hyperium_http::Request`] payloads and receive [`hyperium_http::Response`] payloads utilizing HTTP "keep-alive".
+/// [`HttpClient::connect`] will open a persistent [`HttpClientSession`] to the given domain. This connection must call [`Session::drive()`] until [`Session::status`]
+/// returns [`ConnectionStatus::Connected`], at which point the session can send multiple [`hyperium_http::Request`] payloads and receive [`hyperium_http::Response`] payloads utilizing HTTP "keep-alive".
 ///
 /// ## Example
 ///
@@ -60,24 +90,6 @@ use crate::{
 ///     }
 /// }
 /// ```
-///
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Scheme {
-    Http,
-    Https,
-}
-impl Scheme {
-    pub fn default_port(&self) -> u16 {
-        match self {
-            Self::Http => 80,
-            Self::Https => 443,
-        }
-    }
-}
-
-// TODO: add `connect` function that returns a HttpClientSession but does not automatically send a request
-// TODO: have `request` return a HttpClientSession with a pending Request, and will drive connecting and writing the request using calls to read()
 pub struct HttpClient {
     tls_config: OwnedTLSConfig,
 }
@@ -101,7 +113,8 @@ impl HttpClient {
     /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
     ///
     /// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will have pre-buffered the serialized request request.
-    /// Before calling `read`/`write`, call [`Session::drive()`] to finish connecting and complete any pending TLS handshakes until [`Session::is_connected`] returns true.
+    /// Before calling `read`/`write`, call [`Session::drive()`] to finish connecting and complete any pending TLS handshakes until [`Session::status`]
+    /// returns [`ConnectionStatus::Connected`].
     ///
     /// For now, this only supports HTTP 1.x.
     pub fn connect(
@@ -136,24 +149,18 @@ impl HttpClient {
     ) -> Result<HttpClientSession, io::Error> {
         let (parts, body) = request.into_parts();
         let request = hyperium_http::Request::from_parts(parts, body.into_body());
-
-        let scheme = match request.uri().scheme_str() {
-            None => Scheme::Http,
-            Some("http") => Scheme::Http,
-            Some("https") => Scheme::Https,
-            _ => return Err(io::Error::new(ErrorKind::InvalidData, "bad uri scheme")),
-        };
-        let host = match request.uri().host() {
-            Some(x) => x.to_owned(),
-            None => return Err(io::Error::new(ErrorKind::InvalidData, "missing host")),
-        };
-        let port = match request.uri().port() {
-            Some(x) => x.as_u16(),
-            None => scheme.default_port(),
-        };
-
-        let mut conn = self.connect(&host, port, scheme)?;
-        conn.pending_initial_request = Some(request);
+        let stream = connect_stream(
+            request.uri().scheme_str(),
+            request.uri().host(),
+            request.uri().port().map(|x| x.as_u16()),
+            self.tls_config.as_ref(),
+        )?;
+        let mut conn = HttpClientSession::new(FramingSession::new(
+            TcpSession::new(stream)?,
+            Http1FramingStrategy::new(),
+            0,
+        ));
+        conn.pending_initial_request = Some(request.into());
 
         Ok(conn)
     }
@@ -164,6 +171,35 @@ impl Default for HttpClient {
     }
 }
 
+pub(crate) fn connect_stream(
+    scheme: Option<&str>,
+    host: Option<&str>,
+    port: Option<u16>,
+    tls_config: TLSConfig<'_, '_, '_>,
+) -> Result<TcpStream, Error> {
+    let scheme = match scheme {
+        None => Scheme::Http,
+        Some("http") => Scheme::Http,
+        Some("https") => Scheme::Https,
+        _ => return Err(io::Error::new(ErrorKind::InvalidData, "bad uri scheme")),
+    };
+    let host = match host {
+        Some(x) => x.to_owned(),
+        None => return Err(io::Error::new(ErrorKind::InvalidData, "missing host")),
+    };
+    let port = match port {
+        Some(x) => x,
+        None => scheme.default_port(),
+    };
+    let mut conn = TcpStream::connect(format!("{host}:{port}"))?;
+    if scheme == Scheme::Https {
+        conn = conn
+            .into_tls(&host, tls_config)
+            .map_err(|err| Error::new(ErrorKind::ConnectionRefused, err))?;
+    }
+    Ok(conn)
+}
+
 // pub type HttpClientSession = FramingSession<TcpSession, Http1FramingStrategy>;
 /// A [`Session`] created by the [`HttpClient`].
 ///
@@ -171,7 +207,7 @@ impl Default for HttpClient {
 /// to be enqueued prior to a successful connection, supporting the [`HttpClient::request`] function.
 pub struct HttpClientSession {
     session: FramingSession<TcpSession, Http1FramingStrategy>,
-    pending_initial_request: Option<hyperium_http::Request<Vec<u8>>>,
+    pending_initial_request: Option<HttpRequest>,
 }
 impl HttpClientSession {
     pub fn new(session: FramingSession<TcpSession, Http1FramingStrategy>) -> Self {
@@ -183,15 +219,21 @@ impl HttpClientSession {
 }
 impl Session for HttpClientSession {
     type ReadData<'a> = hyperium_http::Response<Vec<u8>>;
-    type WriteData<'a> = hyperium_http::Request<Vec<u8>>;
+    type WriteData<'a> = HttpRequest;
 
-    fn is_connected(&self) -> bool {
-        self.session.is_connected()
+    fn status(&self) -> crate::ConnectionStatus {
+        self.session.status()
+    }
+
+    fn close(&mut self) {
+        self.session.close()
     }
 
     fn drive(&mut self) -> Result<bool, Error> {
         let mut result = self.session.drive()?;
-        if self.session.is_connected() && self.pending_initial_request.is_some() {
+        if self.session.status() == ConnectionStatus::Connected
+            && self.pending_initial_request.is_some()
+        {
             let wrote = match self.session.write(
                 self.pending_initial_request
                     .take()
@@ -219,8 +261,8 @@ impl Session for HttpClientSession {
     }
 
     fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<Self::ReadData<'a>>, Error> {
-        if self.pending_initial_request.is_none() && self.is_connected() {
-            // make the request/response model more straightforward by not requiring checks to `is_connected` before calling `read`.
+        if self.pending_initial_request.is_none() && self.status() == ConnectionStatus::Connected {
+            // make the request/response model more straightforward by not requiring checks to `status()` before calling `read`.
             // `self.pending_initial_request.is_none()`: only do this when an initial request is pending, otherwise revert to default `read` behavior for persistent streams.
             self.session.read()
         } else {
@@ -236,6 +278,16 @@ impl Session for HttpClientSession {
 /// Extensible public trait to support serializing a variety of body types.
 pub trait IntoBody {
     fn into_body(self) -> Vec<u8>;
+}
+impl IntoBody for String {
+    fn into_body(self) -> Vec<u8> {
+        self.into_bytes()
+    }
+}
+impl IntoBody for &str {
+    fn into_body(self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
 }
 impl IntoBody for Vec<u8> {
     fn into_body(self) -> Vec<u8> {
@@ -272,7 +324,6 @@ impl BodyInfo {
 
 /// A [`FramingStrategy`] for HTTP 1.x where [`FramingStrategy::WriteFrame`] is an [`http::Request`], and the [`FramingStrategy::ReadFrame`] is an [`http::Response`].
 pub struct Http1FramingStrategy {
-    serialized_request: Vec<u8>,
     deserialized_response: Option<hyperium_http::Response<Vec<u8>>>,
     deserialized_size: usize,
     body_info: Option<BodyInfo>,
@@ -280,7 +331,6 @@ pub struct Http1FramingStrategy {
 impl Http1FramingStrategy {
     pub fn new() -> Self {
         Self {
-            serialized_request: Vec::new(),
             deserialized_response: None,
             deserialized_size: 0,
             body_info: None,
@@ -289,7 +339,7 @@ impl Http1FramingStrategy {
 }
 impl FramingStrategy for Http1FramingStrategy {
     type ReadFrame<'a> = hyperium_http::Response<Vec<u8>>;
-    type WriteFrame<'a> = hyperium_http::Request<Vec<u8>>;
+    type WriteFrame<'a> = HttpRequest;
 
     fn check_deserialize_frame(&mut self, data: &[u8], eof: bool) -> Result<bool, Error> {
         if self.deserialized_response.is_none() {
@@ -408,89 +458,92 @@ impl FramingStrategy for Http1FramingStrategy {
         ))
     }
 
-    fn serialize_frame<'a, 'b>(
-        &'a mut self,
-        request: &'a Self::WriteFrame<'b>,
-    ) -> Result<Vec<&'a [u8]>, Error> {
-        // check version
-        match request.version() {
-            hyperium_http::Version::HTTP_10 | hyperium_http::Version::HTTP_11 => {}
-            version => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("unsupported http request version {version:?}").as_str(),
-                ))
-            }
-        }
+    fn write_frame<'a>(
+        &mut self,
+        request: Self::WriteFrame<'a>,
+        buffer: &mut GrowableCircleBuf,
+    ) -> Result<WriteStatus<Self::WriteFrame<'a>>, Error> {
+        let serialized_request = match request {
+            HttpRequest::Request(request) => {
+                // check version
+                match request.version() {
+                    hyperium_http::Version::HTTP_10 | hyperium_http::Version::HTTP_11 => {}
+                    version => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            format!("unsupported http request version {version:?}").as_str(),
+                        ))
+                    }
+                }
 
-        // parse uri
-        let host = match request.uri().host() {
-            Some(x) => x.to_owned(),
-            None => return Err(io::Error::new(ErrorKind::InvalidData, "missing host")),
+                // parse uri
+                let host = match request.uri().host() {
+                    Some(x) => x.to_owned(),
+                    None => return Err(io::Error::new(ErrorKind::InvalidData, "missing host")),
+                };
+
+                // calculate content-length
+                let body = request.body();
+                let content_length = body.len().to_string();
+
+                // construct HTTP/1.x payload
+                let mut serialized_request = Vec::new();
+                serialized_request.extend_from_slice(request.method().as_str().as_bytes());
+                serialized_request.extend_from_slice(" ".as_bytes());
+                serialized_request.extend_from_slice(request.uri().path().as_bytes());
+                if let Some(query) = request.uri().query() {
+                    serialized_request.extend_from_slice("?".as_bytes());
+                    serialized_request.extend_from_slice(query.as_bytes());
+                }
+                serialized_request
+                    .extend_from_slice(format!(" {:?}", request.version()).as_bytes());
+                serialized_request.extend_from_slice(LINE_BREAK.as_bytes());
+                {
+                    // host header
+                    serialized_request.extend_from_slice(HOST.as_str().as_bytes());
+                    serialized_request.extend_from_slice(": ".as_bytes());
+                    serialized_request.extend_from_slice(host.as_bytes());
+                    serialized_request.extend_from_slice(LINE_BREAK.as_bytes());
+                }
+                for (n, v) in request.headers().iter() {
+                    // request headers
+                    serialized_request.extend_from_slice(n.as_str().as_bytes());
+                    serialized_request.extend_from_slice(": ".as_bytes());
+                    serialized_request.extend_from_slice(
+                        v.to_str()
+                            .map_err(|_| {
+                                Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!("could not convert header '{}' to string", n.as_str())
+                                        .as_str(),
+                                )
+                            })?
+                            .as_bytes(),
+                    );
+                    serialized_request.extend_from_slice(LINE_BREAK.as_bytes());
+                }
+                if body.len() > 0 {
+                    // content length header
+                    serialized_request.extend_from_slice(CONTENT_LENGTH.as_str().as_bytes());
+                    serialized_request.extend_from_slice(": ".as_bytes());
+                    serialized_request.extend_from_slice(content_length.as_bytes());
+                    serialized_request.extend_from_slice(LINE_BREAK.as_bytes());
+                }
+                serialized_request.extend_from_slice(LINE_BREAK.as_bytes());
+                serialized_request.extend_from_slice(body);
+                serialized_request
+            }
+            HttpRequest::Serialized(serialized) => serialized,
         };
 
-        // calculate content-length
-        let body = request.body();
-        let content_length = body.len().to_string();
-
-        // construct HTTP/1.1 payload
-        self.serialized_request = Vec::new();
-        self.serialized_request
-            .extend_from_slice(request.method().as_str().as_bytes());
-        self.serialized_request.extend_from_slice(" ".as_bytes());
-        self.serialized_request
-            .extend_from_slice(request.uri().path().as_bytes());
-        if let Some(query) = request.uri().query() {
-            self.serialized_request.extend_from_slice("?".as_bytes());
-            self.serialized_request.extend_from_slice(query.as_bytes());
-        }
-        self.serialized_request
-            .extend_from_slice(format!(" {:?}", request.version()).as_bytes());
-        self.serialized_request
-            .extend_from_slice(LINE_BREAK.as_bytes());
-        {
-            // host header
-            self.serialized_request
-                .extend_from_slice(HOST.as_str().as_bytes());
-            self.serialized_request.extend_from_slice(": ".as_bytes());
-            self.serialized_request.extend_from_slice(host.as_bytes());
-            self.serialized_request
-                .extend_from_slice(LINE_BREAK.as_bytes());
-        }
-        for (n, v) in request.headers().iter() {
-            // request headers
-            self.serialized_request
-                .extend_from_slice(n.as_str().as_bytes());
-            self.serialized_request.extend_from_slice(": ".as_bytes());
-            self.serialized_request.extend_from_slice(
-                v.to_str()
-                    .map_err(|_| {
-                        Error::new(
-                            ErrorKind::InvalidData,
-                            format!("could not convert header '{}' to string", n.as_str()).as_str(),
-                        )
-                    })?
-                    .as_bytes(),
-            );
-            self.serialized_request
-                .extend_from_slice(LINE_BREAK.as_bytes());
-        }
-        if body.len() > 0 {
-            // content length header
-            self.serialized_request
-                .extend_from_slice(CONTENT_LENGTH.as_str().as_bytes());
-            self.serialized_request.extend_from_slice(": ".as_bytes());
-            self.serialized_request
-                .extend_from_slice(content_length.as_bytes());
-            self.serialized_request
-                .extend_from_slice(LINE_BREAK.as_bytes());
-        }
-        self.serialized_request
-            .extend_from_slice(LINE_BREAK.as_bytes());
-        self.serialized_request.extend_from_slice(body);
-
         // returned pending request
-        Ok(vec![&self.serialized_request])
+        if buffer.try_write(&vec![&serialized_request])? {
+            Ok(WriteStatus::Success)
+        } else {
+            Ok(WriteStatus::Pending(HttpRequest::Serialized(
+                serialized_request,
+            )))
+        }
     }
 }
 

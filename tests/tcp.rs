@@ -2,7 +2,7 @@ use tcp_stream::TLSConfig;
 
 use nbio::{
     tcp::{TcpServer, TcpSession},
-    ReadStatus, Session, WriteStatus,
+    ConnectionStatus, ReadStatus, Session, WriteStatus,
 };
 
 #[test]
@@ -52,7 +52,7 @@ pub fn tcp_tls() {
         .into_tls("www.google.com", TLSConfig::default())
         .unwrap();
 
-    while !client.is_connected() {
+    while client.status() != ConnectionStatus::Connected {
         client.drive().unwrap();
     }
 
