@@ -1,5 +1,7 @@
 use std::{
-    borrow::{Borrow, Cow},
+    borrow::Cow,
+    collections::VecDeque,
+    fmt::Debug,
     io::{Cursor, Error, ErrorKind},
     os::fd::FromRawFd,
 };
@@ -9,33 +11,36 @@ use tungstenite::{
     client::IntoClientRequest,
     error::ProtocolError,
     handshake::MidHandshake,
-    protocol::{
-        frame::{
-            coding::{Control, Data, OpCode},
-            FrameHeader,
-        },
-        CloseFrame,
+    protocol::frame::{
+        coding::{CloseCode, Control, Data, OpCode},
+        FrameHeader,
     },
     ClientHandshake,
 };
 
 use crate::{
-    frame::{DeserializedFrame, FramingSession, FramingStrategy},
+    frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
+    http::Scheme,
     tcp::TcpSession,
-    ConnectionStatus, ReadStatus, Session, WriteStatus,
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
-pub type WsRequest = tungstenite::handshake::client::Request;
-pub type UpgradeResponse = tungstenite::handshake::client::Response;
+use self::inner::{Frame, Payload};
+
+pub type ClientRequest = tungstenite::handshake::client::Request;
+pub type ClientResponse = tungstenite::handshake::client::Response;
 
 pub struct WebSocketSession {
-    handshake: Option<WsHandshake>,
-    session: Option<FramingSession<TcpSession, WebSocketFramingStrategy>>,
+    handshake: Option<PendingHandshake>,
+    session: Option<FrameDuplex<TcpSession, WebSocketFrameDeserializer, WebSocketFrameSerializer>>,
     write_buffer_capacity: usize,
-    upgrade_response: Option<UpgradeResponse>,
+    upgrade_response: Option<ClientResponse>,
+    automatic_pongs: bool,
+    pong_queue: VecDeque<Vec<u8>>,
 }
 impl WebSocketSession {
-    /// Connect as a WebSocket client
+    /// Connect as a WebSocket client. By default, the session will not automatically send pong responses.
+    /// To enable automatic pong responses, use [`WebSocketSession::with_automatic_pongs`]
     pub fn connect<I: IntoClientRequest>(
         request: I,
         tls_config: Option<TLSConfig<'_, '_, '_>>,
@@ -43,18 +48,37 @@ impl WebSocketSession {
         let request = request
             .into_client_request()
             .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+        let scheme = match request.uri().scheme_str() {
+            None => Scheme::Http,
+            Some("ws") => Scheme::Http,
+            Some("wss") => Scheme::Https,
+            x => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("invalid scheme {x:?}"),
+                ))
+            }
+        };
         let stream = crate::http::connect_stream(
-            request.uri().scheme().map(|x| x.as_ref()),
+            scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
             tls_config.unwrap_or_default(),
         )?;
         Ok(Self {
-            handshake: Some(WsHandshake::StartClientHandshake(stream, request)),
+            handshake: Some(PendingHandshake::StartClientHandshake(stream, request)),
             session: None,
             write_buffer_capacity: 4096,
             upgrade_response: None,
+            automatic_pongs: false,
+            pong_queue: VecDeque::new(),
         })
+    }
+
+    /// Set the flag that controls automatically sending pong responses
+    pub fn with_automatic_pongs(mut self) -> Self {
+        self.automatic_pongs = true;
+        self
     }
 
     /// Set the underlying `write_buffer_capacity` to a non-default value. Defaults to `4096`.
@@ -71,16 +95,19 @@ impl WebSocketSession {
         self.write_buffer_capacity = write_buffer_capacity;
         Ok(self)
     }
+
+    /// After connecting as a client, this function can be used to get the initial HTTP response to the Upgrade request.
+    /// When requested in any other circumstance, it will return `None`.
+    pub fn upgrade_response<'a>(&'a self) -> Option<&'a ClientResponse> {
+        self.upgrade_response.as_ref()
+    }
 }
 impl Session for WebSocketSession {
-    type ReadData<'a> = WsMessage<'a>;
-    type WriteData<'a> = WsMessage<'a>;
-
-    fn status(&self) -> ConnectionStatus {
+    fn status(&self) -> SessionStatus {
         match &self.session {
             None => match &self.handshake {
-                None => ConnectionStatus::Closed,
-                Some(_) => ConnectionStatus::Connecting,
+                None => SessionStatus::Terminated,
+                Some(_) => SessionStatus::Establishing,
             },
             Some(x) => x.status(),
         }
@@ -91,25 +118,19 @@ impl Session for WebSocketSession {
         self.session = None;
     }
 
-    fn flush(&mut self) -> Result<(), Error> {
-        match &mut self.session {
-            None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
-            Some(x) => x.flush(),
-        }
-    }
-
-    fn drive(&mut self) -> Result<bool, Error> {
+    fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match &mut self.session {
             None => match self.handshake.take() {
                 None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
                 Some(handshake) => {
                     let (result, handshake) = handshake.drive()?;
                     match handshake {
-                        WsHandshake::Complete(stream, response) => {
+                        PendingHandshake::Complete(stream, response) => {
                             self.upgrade_response = Some(response);
-                            self.session = Some(FramingSession::new(
+                            self.session = Some(FrameDuplex::new(
                                 TcpSession::new(stream)?,
-                                WebSocketFramingStrategy::new(),
+                                WebSocketFrameDeserializer::new(),
+                                WebSocketFrameSerializer::new(),
                                 self.write_buffer_capacity,
                             ))
                         }
@@ -118,64 +139,166 @@ impl Session for WebSocketSession {
                     Ok(result)
                 }
             },
-            Some(x) => x.drive(),
-        }
-    }
-
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, Error> {
-        match &mut self.session {
-            None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
-            Some(x) => match self.upgrade_response.take() {
-                Some(x) => Ok(ReadStatus::Data(WsMessage::Connected(x))),
-                None => x.read(),
-            },
-        }
-    }
-
-    fn write<'a>(
-        &mut self,
-        data: Self::WriteData<'a>,
-    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error> {
-        match &mut self.session {
-            None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
-            Some(x) => x.write(data),
+            Some(session) => {
+                let mut outcome = DriveOutcome::Idle;
+                if let Some(payload) = self.pong_queue.front() {
+                    if let PublishOutcome::Published =
+                        session.publish(Message::Pong(payload.into()))?
+                    {
+                        self.pong_queue.pop_front();
+                    }
+                    outcome = DriveOutcome::Active;
+                }
+                if session.drive()? == DriveOutcome::Active {
+                    outcome = DriveOutcome::Active;
+                }
+                Ok(outcome)
+            }
         }
     }
 }
+impl Receive for WebSocketSession {
+    type ReceivePayload<'a> = Message<'a>;
 
-#[derive(Debug, Clone)]
-pub enum WsMessage<'a> {
-    Connected(UpgradeResponse),
+    fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
+        match &mut self.session {
+            None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
+            Some(session) => {
+                let message = session.receive()?;
+                if self.automatic_pongs {
+                    if let ReceiveOutcome::Payload(Message::Ping(payload)) = &message {
+                        self.pong_queue.push_back(payload.to_vec());
+                    }
+                }
+                Ok(message)
+            }
+        }
+    }
+}
+impl Publish for WebSocketSession {
+    type PublishPayload<'a> = Message<'a>;
+
+    fn publish<'a>(
+        &mut self,
+        data: Self::PublishPayload<'a>,
+    ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
+        match &mut self.session {
+            None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
+            Some(x) => x.publish(data),
+        }
+    }
+}
+impl Flush for WebSocketSession {
+    fn flush(&mut self) -> Result<(), Error> {
+        match &mut self.session {
+            None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
+            Some(x) => x.flush(),
+        }
+    }
+}
+impl Debug for WebSocketSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSocketSession")
+            .field("session", &self.session)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Message<'a> {
     Text(Cow<'a, str>),
     Binary(Cow<'a, [u8]>),
     Ping(Cow<'a, [u8]>),
     Pong(Cow<'a, [u8]>),
     Close(Option<CloseFrame<'a>>),
-    Frame(WsFrame<'a>),
+    Frame(Frame<'a>),
 }
-impl<'a> From<tungstenite::Message> for WsMessage<'a> {
+impl<'a> Message<'a> {
+    pub fn into_owned<'b>(self) -> Message<'b> {
+        match self {
+            Self::Text(x) => Message::Text(Cow::Owned(x.into_owned())),
+            Self::Binary(x) => Message::Binary(Cow::Owned(x.into_owned())),
+            Self::Ping(x) => Message::Ping(Cow::Owned(x.into_owned())),
+            Self::Pong(x) => Message::Pong(Cow::Owned(x.into_owned())),
+            Self::Close(x) => Message::Close(x.map(|x| x.into_owned())),
+            Self::Frame(x) => Message::Frame(x.into_owned()),
+        }
+    }
+}
+impl<'a> TryFrom<Message<'a>> for Frame<'a> {
+    type Error = Error;
+    fn try_from(value: Message<'a>) -> Result<Self, Self::Error> {
+        #[inline]
+        fn apply_mask(buf: &mut [u8], mask: &[u8; 4]) {
+            for (i, byte) in buf.iter_mut().enumerate() {
+                *byte ^= mask[i & 3];
+            }
+        }
+
+        let (opcode, payload) = match value {
+            Message::Frame(x) => return Ok(x),
+            Message::Text(x) => (OpCode::Data(Data::Text), x.into()),
+            Message::Binary(x) => (OpCode::Data(Data::Binary), x.into()),
+            Message::Ping(x) => (OpCode::Control(Control::Ping), x.into()),
+            Message::Pong(x) => (OpCode::Control(Control::Pong), x.into()),
+            Message::Close(x) => {
+                let mut payload = Vec::new();
+                if let Some(x) = x {
+                    payload.append(&mut u16::to_be_bytes(x.code.into()).into());
+                    payload.append(&mut x.reason.as_bytes().to_vec())
+                };
+                (
+                    OpCode::Control(Control::Close),
+                    Cow::<'a, [u8]>::Owned(payload).into(),
+                )
+            }
+        };
+
+        let mask = rand::random();
+        let mut payload = match payload {
+            Payload::Bytes(x) => x.into_owned(),
+            Payload::Str(x) => x.into_owned().into_bytes(),
+        };
+        apply_mask(&mut payload, &mask);
+
+        let mut header = FrameHeader::default();
+        header.opcode = opcode;
+        header.mask = Some(mask);
+
+        let mut serialized_header = Vec::new();
+        header
+            .format(payload.len() as u64, &mut serialized_header)
+            .map_err(|err| Error::new(ErrorKind::Other, err))?;
+        Ok(Frame {
+            header,
+            payload: Payload::Bytes(payload.into()),
+            serialized_header: Some(serialized_header),
+        })
+    }
+}
+impl<'a> From<tungstenite::Message> for Message<'a> {
     fn from(value: tungstenite::Message) -> Self {
         match value {
-            tungstenite::Message::Text(x) => WsMessage::Text(Cow::Owned(x)),
-            tungstenite::Message::Binary(x) => WsMessage::Binary(Cow::Owned(x)),
-            tungstenite::Message::Ping(x) => WsMessage::Ping(Cow::Owned(x)),
-            tungstenite::Message::Pong(x) => WsMessage::Pong(Cow::Owned(x)),
-            tungstenite::Message::Close(x) => WsMessage::Close(x),
+            tungstenite::Message::Text(x) => Message::Text(Cow::Owned(x)),
+            tungstenite::Message::Binary(x) => Message::Binary(Cow::Owned(x)),
+            tungstenite::Message::Ping(x) => Message::Ping(Cow::Owned(x)),
+            tungstenite::Message::Pong(x) => Message::Pong(Cow::Owned(x)),
+            tungstenite::Message::Close(x) => Message::Close(x.map(|x| x.into())),
             tungstenite::Message::Frame(_) => todo!(),
         }
     }
 }
-impl<'a> TryFrom<WsFrame<'a>> for WsMessage<'a> {
+impl<'a> TryFrom<Frame<'a>> for Message<'a> {
     type Error = Error;
-    fn try_from(value: WsFrame<'a>) -> Result<Self, Self::Error> {
+    fn try_from(value: Frame<'a>) -> Result<Self, Self::Error> {
         match value.header.opcode {
-            OpCode::Data(Data::Text) => Ok(WsMessage::Text(value.payload.into())),
-            OpCode::Data(Data::Binary) => Ok(WsMessage::Binary(value.payload.into())),
-            OpCode::Control(Control::Ping) => Ok(WsMessage::Ping(value.payload.into())),
-            OpCode::Control(Control::Pong) => Ok(WsMessage::Pong(value.payload.into())),
-            OpCode::Control(Control::Close) => Ok(WsMessage::Close(parse_close_frame(
-                value.payload.as_bytes(),
-            )?)),
+            OpCode::Data(Data::Text) => Ok(Message::Text(value.payload.into())),
+            OpCode::Data(Data::Binary) => Ok(Message::Binary(value.payload.into())),
+            OpCode::Control(Control::Ping) => Ok(Message::Ping(value.payload.into())),
+            OpCode::Control(Control::Pong) => Ok(Message::Pong(value.payload.into())),
+            OpCode::Control(Control::Close) => {
+                Ok(Message::Close(parse_close_frame(value.payload.as_bytes())?))
+            }
             opcode => Err(Error::new(
                 ErrorKind::Other,
                 format!("unrecognized opcode {opcode:?}"),
@@ -184,114 +307,147 @@ impl<'a> TryFrom<WsFrame<'a>> for WsMessage<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct WsFrame<'a> {
-    pub header: FrameHeader,
-    serialized_header: Vec<u8>,
-    pub payload: WsPayload<'a>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloseFrame<'a> {
+    pub code: CloseCode,
+    pub reason: Cow<'a, str>,
 }
-
-#[derive(Debug, Clone)]
-pub enum WsPayload<'a> {
-    Str(Cow<'a, str>),
-    Bytes(Cow<'a, [u8]>),
-}
-impl<'a> WsPayload<'a> {
-    pub fn as_bytes(&'a self) -> &'a [u8] {
-        match self {
-            Self::Str(x) => x.as_bytes(),
-            Self::Bytes(x) => x.borrow(),
+impl<'a> CloseFrame<'a> {
+    pub fn into_owned<'b>(self) -> CloseFrame<'b> {
+        CloseFrame {
+            code: self.code,
+            reason: Cow::Owned(self.reason.into_owned()),
         }
     }
 }
-impl<'a> From<Cow<'a, str>> for WsPayload<'a> {
-    fn from(value: Cow<'a, str>) -> Self {
-        Self::Str(value)
-    }
-}
-impl<'a> From<Cow<'a, [u8]>> for WsPayload<'a> {
-    fn from(value: Cow<'a, [u8]>) -> Self {
-        Self::Bytes(value)
-    }
-}
-impl<'a> From<WsPayload<'a>> for Cow<'a, [u8]> {
-    fn from(value: WsPayload<'a>) -> Self {
-        match value {
-            WsPayload::Str(x) => Cow::Owned(x.as_bytes().to_vec()),
-            WsPayload::Bytes(x) => x,
-        }
-    }
-}
-impl<'a> From<WsPayload<'a>> for Cow<'a, str> {
-    fn from(value: WsPayload<'a>) -> Self {
-        match value {
-            WsPayload::Str(x) => x,
-            WsPayload::Bytes(x) => Cow::Owned(String::from_utf8_lossy(x.borrow()).to_string()),
+impl<'a> From<tungstenite::protocol::CloseFrame<'a>> for CloseFrame<'a> {
+    fn from(value: tungstenite::protocol::CloseFrame<'a>) -> Self {
+        Self {
+            code: value.code,
+            reason: value.reason,
         }
     }
 }
 
-struct AssembledDataFragments {
+pub(crate) mod inner {
+    use std::borrow::{Borrow, Cow};
+
+    use tungstenite::protocol::frame::FrameHeader;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Frame<'a> {
+        pub header: FrameHeader,
+        pub payload: Payload<'a>,
+        pub serialized_header: Option<Vec<u8>>,
+    }
+    impl<'a> Frame<'a> {
+        pub fn into_owned<'b>(self) -> Frame<'b> {
+            Frame {
+                header: self.header,
+                payload: self.payload.into_owned(),
+                serialized_header: self.serialized_header,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Payload<'a> {
+        Str(Cow<'a, str>),
+        Bytes(Cow<'a, [u8]>),
+    }
+    impl<'a> Payload<'a> {
+        pub fn as_bytes(&'a self) -> &'a [u8] {
+            match self {
+                Self::Str(x) => x.as_bytes(),
+                Self::Bytes(x) => x.borrow(),
+            }
+        }
+        pub fn into_owned<'b>(self) -> Payload<'b> {
+            match self {
+                Self::Str(x) => Payload::Str(Cow::Owned(x.into_owned())),
+                Self::Bytes(x) => Payload::Bytes(Cow::Owned(x.into_owned())),
+            }
+        }
+    }
+    impl<'a> From<Cow<'a, str>> for Payload<'a> {
+        fn from(value: Cow<'a, str>) -> Self {
+            Self::Str(value)
+        }
+    }
+    impl<'a> From<Cow<'a, [u8]>> for Payload<'a> {
+        fn from(value: Cow<'a, [u8]>) -> Self {
+            Self::Bytes(value)
+        }
+    }
+    impl<'a> From<Payload<'a>> for Cow<'a, [u8]> {
+        fn from(value: Payload<'a>) -> Self {
+            match value {
+                Payload::Str(x) => Cow::Owned(x.as_bytes().to_vec()),
+                Payload::Bytes(x) => x,
+            }
+        }
+    }
+    impl<'a> From<Payload<'a>> for Cow<'a, str> {
+        fn from(value: Payload<'a>) -> Self {
+            match value {
+                Payload::Str(x) => x,
+                Payload::Bytes(x) => Cow::Owned(String::from_utf8_lossy(x.borrow()).to_string()),
+            }
+        }
+    }
+}
+
+struct FragmentBuffer {
     opcode: Data,
     payload: Vec<u8>,
 }
-impl AssembledDataFragments {
-    pub fn new(frames: Vec<(Data, &[u8])>) -> Result<Self, Error> {
-        let opcode = match frames.get(0) {
-            None => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "cannot assemble zero frames",
-                ))
-            }
-            Some(&(x, _)) => x,
-        };
-        let mut payload = Vec::new();
-        for (_, x) in frames.into_iter() {
-            payload.append(&mut x.to_vec());
+impl FragmentBuffer {
+    pub fn new(opcode: Data) -> Self {
+        Self {
+            opcode,
+            payload: Vec::new(),
         }
-        Ok(Self { opcode, payload })
     }
-    pub fn append(&mut self, frames: Vec<(Data, &[u8])>) {
-        for (_, x) in frames.into_iter() {
-            self.payload.append(&mut x.to_vec());
-        }
+    pub fn append(&mut self, frame: &[u8]) {
+        self.payload.append(&mut frame.to_vec());
     }
 }
 
-pub struct WebSocketFramingStrategy {
+pub struct WebSocketFrameDeserializer {
     /// optionally used to assemble fragmented data frames
-    fragments: Option<AssembledDataFragments>,
+    fragments: Option<FragmentBuffer>,
 }
-impl WebSocketFramingStrategy {
+impl WebSocketFrameDeserializer {
     pub fn new() -> Self {
         Self { fragments: None }
     }
 }
-impl Default for WebSocketFramingStrategy {
+impl Default for WebSocketFrameDeserializer {
     fn default() -> Self {
         Self::new()
     }
 }
-impl FramingStrategy for WebSocketFramingStrategy {
-    type ReadFrame<'a> = WsMessage<'a>;
-    type WriteFrame<'a> = WsMessage<'a>;
+impl DeserializeFrame for WebSocketFrameDeserializer {
+    type DeserializedFrame<'a> = Message<'a>;
 
     fn check_deserialize_frame(&mut self, data: &[u8], _eof: bool) -> Result<bool, Error> {
         let mut cursor = Cursor::new(data);
         loop {
-            if let Some((header, payload_size)) = FrameHeader::parse(&mut cursor)
+            match FrameHeader::parse(&mut cursor)
                 .map_err(|err| Error::new(ErrorKind::InvalidData, err))?
             {
-                if cursor.position() + payload_size <= data.len() as u64 {
-                    if header.is_final {
-                        // received at least one final frame
-                        return Ok(true);
+                None => return Ok(false),
+                Some((header, payload_size)) => {
+                    if cursor.position() + payload_size <= data.len() as u64 {
+                        if header.is_final {
+                            // received at least one final frame
+                            return Ok(true);
+                        } else {
+                            cursor.set_position(cursor.position() + payload_size);
+                        }
                     } else {
-                        cursor.set_position(cursor.position() + payload_size);
+                        return Ok(false);
                     }
-                } else {
-                    return Ok(false);
                 }
             }
         }
@@ -300,8 +456,7 @@ impl FramingStrategy for WebSocketFramingStrategy {
     fn deserialize_frame<'a>(
         &'a mut self,
         data: &'a [u8],
-    ) -> Result<DeserializedFrame<Self::ReadFrame<'a>>, Error> {
-        let mut data_fragments = Vec::new();
+    ) -> Result<SizedFrame<Self::DeserializedFrame<'a>>, Error> {
         let mut cursor = Cursor::new(data);
         loop {
             if let Some((header, payload_size)) = FrameHeader::parse(&mut cursor)
@@ -316,49 +471,45 @@ impl FramingStrategy for WebSocketFramingStrategy {
                         OpCode::Data(opcode) => {
                             if header.is_final {
                                 // final, return assembled data fragments
-                                if self.fragments.is_none() && data_fragments.is_empty() {
-                                    // single fragment data, return it as-is
-                                    return Ok(DeserializedFrame::new(
-                                        WsFrame {
+                                if self.fragments.is_none() {
+                                    // single fragment data, return borrowed result
+                                    return Ok(SizedFrame::new(
+                                        Frame {
                                             header,
-                                            serialized_header: Vec::new(),
+                                            serialized_header: None,
                                             payload: Cow::Borrowed(payload).into(),
                                         }
                                         .try_into()?,
                                         payload_end as usize,
                                     ));
                                 } else {
-                                    // append to other fragments, return result
-                                    data_fragments.push((opcode, payload));
-                                    if self.fragments.is_none() {
-                                        self.fragments =
-                                            Some(AssembledDataFragments::new(data_fragments)?);
-                                    } else {
-                                        self.fragments
-                                            .as_mut()
-                                            .expect("partially assembled fragments")
-                                            .append(data_fragments);
-                                    }
-                                    let assembled_fragments =
-                                        self.fragments.take().expect("fully assembled fragments");
+                                    // append to other fragments, return owned result
+                                    let mut fragments = self
+                                        .fragments
+                                        .take()
+                                        .unwrap_or_else(|| FragmentBuffer::new(opcode));
+                                    fragments.append(data);
                                     let mut header = FrameHeader::default();
-                                    header.opcode = OpCode::Data(assembled_fragments.opcode);
-                                    return Ok(DeserializedFrame::new(
-                                        WsFrame {
+                                    header.opcode = OpCode::Data(fragments.opcode);
+                                    return Ok(SizedFrame::new(
+                                        Frame {
                                             header,
-                                            serialized_header: Vec::new(),
-                                            payload: Cow::Owned::<'a, [u8]>(
-                                                assembled_fragments.payload,
-                                            )
-                                            .into(),
+                                            serialized_header: None,
+                                            payload: Cow::Owned::<'a, [u8]>(fragments.payload)
+                                                .into(),
                                         }
                                         .try_into()?,
                                         payload_end as usize,
                                     ));
                                 }
                             } else {
-                                // not final, append data fragment
-                                data_fragments.push((opcode, payload));
+                                // not final, append pending data fragment to state
+                                let mut fragments = self
+                                    .fragments
+                                    .take()
+                                    .unwrap_or_else(|| FragmentBuffer::new(opcode));
+                                fragments.append(payload);
+                                self.fragments = Some(fragments);
                             }
                         }
                         OpCode::Control(_) => {
@@ -368,18 +519,11 @@ impl FramingStrategy for WebSocketFramingStrategy {
                                     "WebSocket encounted fragmented control frame",
                                 ));
                             }
-                            if !data_fragments.is_empty() {
-                                // add encountered data fragments to state
-                                if self.fragments.is_none() {
-                                    self.fragments =
-                                        Some(AssembledDataFragments::new(data_fragments)?);
-                                }
-                            }
                             // return the control frame
-                            return Ok(DeserializedFrame::new(
-                                WsFrame {
+                            return Ok(SizedFrame::new(
+                                Frame {
                                     header,
-                                    serialized_header: Vec::new(),
+                                    serialized_header: None,
                                     payload: Cow::Borrowed(payload).into(),
                                 }
                                 .try_into()?,
@@ -391,73 +535,48 @@ impl FramingStrategy for WebSocketFramingStrategy {
             }
         }
     }
+}
 
-    fn write_frame<'a>(
-        &mut self,
-        frame: Self::WriteFrame<'a>,
-        buffer: &mut crate::buffer::GrowableCircleBuf,
-    ) -> Result<crate::WriteStatus<Self::WriteFrame<'a>>, Error> {
-        let frame = match frame {
-            WsMessage::Connected(_) => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "cannot write WsMessage::Connected",
-                ))
-            }
-            WsMessage::Text(payload) => serialize_frame(OpCode::Data(Data::Text), payload)?,
-            WsMessage::Binary(payload) => serialize_frame(OpCode::Data(Data::Binary), payload)?,
-            WsMessage::Ping(payload) => serialize_frame(OpCode::Control(Control::Ping), payload)?,
-            WsMessage::Pong(payload) => serialize_frame(OpCode::Control(Control::Pong), payload)?,
-            WsMessage::Close(close_frame) => serialize_frame(
-                OpCode::Control(Control::Close),
-                serialize_close_frame_payload(&close_frame)?,
-            )?,
-            WsMessage::Frame(frame) => frame,
-        };
-        if frame.serialized_header.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "frame is missing serialized header",
-            ));
-        }
-        if buffer.try_write(&vec![
-            frame.serialized_header.as_slice(),
-            frame.payload.as_bytes(),
-        ])? {
-            Ok(WriteStatus::Success)
-        } else {
-            Ok(WriteStatus::Pending(WsMessage::Frame(frame)))
-        }
+pub struct WebSocketFrameSerializer {
+    /// optionally used to assemble fragmented data frames
+    fragments: Option<FragmentBuffer>,
+}
+impl WebSocketFrameSerializer {
+    pub fn new() -> Self {
+        Self { fragments: None }
     }
 }
-
-fn serialize_frame<'a, I: Into<WsPayload<'a>>>(
-    opcode: OpCode,
-    payload: I,
-) -> Result<WsFrame<'a>, Error> {
-    let payload = payload.into();
-    let mut header = FrameHeader::default();
-    header.opcode = opcode;
-    let mut serialized_header = Vec::new();
-    header
-        .format(payload.as_bytes().len() as u64, &mut serialized_header)
-        .map_err(|err| Error::new(ErrorKind::Other, err))?;
-    Ok(WsFrame {
-        header,
-        serialized_header,
-        payload: payload.into(),
-    })
+impl Default for WebSocketFrameSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
-
-fn serialize_close_frame_payload<'a, 'b>(
-    close_frame: &Option<CloseFrame<'a>>,
-) -> Result<Cow<'b, [u8]>, Error> {
-    let mut payload = Vec::new();
-    if let Some(x) = close_frame {
-        payload.append(&mut u16::to_be_bytes(x.code.into()).into());
-        payload.append(&mut x.reason.as_bytes().to_vec())
-    };
-    Ok(Cow::Owned(payload))
+impl SerializeFrame for WebSocketFrameSerializer {
+    type SerializedFrame<'a> = Message<'a>;
+    fn serialize_frame<'a>(
+        &mut self,
+        frame: Self::SerializedFrame<'a>,
+        buffer: &mut crate::buffer::GrowableCircleBuf,
+    ) -> Result<crate::PublishOutcome<Self::SerializedFrame<'a>>, Error> {
+        let frame: Frame<'a> = frame.try_into()?;
+        let serialized_header = match &frame.serialized_header {
+            Some(x) => x,
+            None => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "frame is missing serialized header",
+                ))
+            }
+        };
+        if buffer.try_write(&vec![
+            serialized_header.as_slice(),
+            frame.payload.as_bytes(),
+        ])? {
+            Ok(PublishOutcome::Published)
+        } else {
+            Ok(PublishOutcome::Incomplete(Message::Frame(frame)))
+        }
+    }
 }
 
 fn parse_close_frame<'a>(payload: &[u8]) -> Result<Option<CloseFrame<'a>>, Error> {
@@ -478,37 +597,37 @@ fn parse_close_frame<'a>(payload: &[u8]) -> Result<Option<CloseFrame<'a>>, Error
     }
 }
 
-enum WsHandshake {
-    StartClientHandshake(TcpStream, WsRequest),
+enum PendingHandshake {
+    StartClientHandshake(TcpStream, ClientRequest),
     MidClientHandshake(MidHandshake<ClientHandshake<TcpStream>>),
-    Complete(TcpStream, UpgradeResponse),
+    Complete(TcpStream, ClientResponse),
 }
-impl WsHandshake {
+impl PendingHandshake {
     /// drive the connection handshake
-    pub fn drive(self) -> Result<(bool, Self), Error> {
+    pub fn drive(self) -> Result<(DriveOutcome, Self), Error> {
         match self {
             Self::StartClientHandshake(stream, request) => {
                 let mid = ClientHandshake::start(stream, request, None)
                     .map_err(|err| Error::new(ErrorKind::ConnectionAborted, err))?;
-                Ok((true, Self::MidClientHandshake(mid)))
+                Ok((DriveOutcome::Active, Self::MidClientHandshake(mid)))
             }
             Self::MidClientHandshake(handshake) => match handshake.handshake() {
                 Ok((mut ws, response)) => {
                     // TODO: avoid unsafe and need to swap with extra work doing more of the handshake process ourselves
                     let mut stream = unsafe { TcpStream::from_raw_fd(0) };
                     std::mem::swap(ws.get_mut(), &mut stream);
-                    Ok((true, Self::Complete(stream, response)))
+                    Ok((DriveOutcome::Active, Self::Complete(stream, response)))
                 }
                 Err(err) => match err {
                     tungstenite::HandshakeError::Interrupted(mid) => {
-                        Ok((false, Self::MidClientHandshake(mid)))
+                        Ok((DriveOutcome::Idle, Self::MidClientHandshake(mid)))
                     }
                     tungstenite::HandshakeError::Failure(err) => {
                         Err(Error::new(ErrorKind::ConnectionAborted, err))
                     }
                 },
             },
-            Self::Complete(s, r) => Ok((false, Self::Complete(s, r))),
+            Self::Complete(s, r) => Ok((DriveOutcome::Active, Self::Complete(s, r))),
         }
     }
 }

@@ -2,7 +2,7 @@ use std::{net::Ipv4Addr, str::FromStr};
 
 use http::{Request, StatusCode};
 
-use nbio::{http::HttpClient, ReadStatus, Session};
+use nbio::{http::HttpClient, Publish, Receive, ReceiveOutcome, Session};
 
 #[test]
 fn test_google_chunked_response() {
@@ -12,10 +12,10 @@ fn test_google_chunked_response() {
         .request(Request::get("https://www.google.com").body(()).unwrap())
         .unwrap();
 
-    // read the conn until a full response is received
+    // receive the conn until a full response is received
     loop {
         conn.drive().unwrap();
-        if let ReadStatus::Data(r) = conn.read().unwrap() {
+        if let ReceiveOutcome::Payload(r) = conn.receive().unwrap() {
             // validate the response
             assert_eq!(r.status(), StatusCode::OK);
             assert!(String::from_utf8_lossy(r.body()).ends_with("</html>"));
@@ -32,10 +32,10 @@ fn test_simple_response() {
         .request(Request::get("http://icanhazip.com").body(()).unwrap())
         .unwrap();
 
-    // read the conn until a full response is received
+    // receive the conn until a full response is received
     loop {
         conn.drive().unwrap();
-        if let ReadStatus::Data(r) = conn.read().unwrap() {
+        if let ReceiveOutcome::Payload(r) = conn.receive().unwrap() {
             // validate the response
             assert_eq!(r.status(), StatusCode::OK);
             let body = String::from_utf8_lossy(r.body());
@@ -53,10 +53,10 @@ fn test_keep_alive() {
         .request(Request::get("http://icanhazip.com").body(()).unwrap())
         .unwrap();
 
-    // read the conn until the first full response is received
+    // receive the conn until the first full response is received
     loop {
         conn.drive().unwrap();
-        if let ReadStatus::Data(r) = conn.read().unwrap() {
+        if let ReceiveOutcome::Payload(r) = conn.receive().unwrap() {
             // validate the response
             assert_eq!(r.status(), StatusCode::OK);
             let body = String::from_utf8_lossy(r.body());
@@ -67,7 +67,7 @@ fn test_keep_alive() {
     }
 
     // write another request
-    conn.write(
+    conn.publish(
         Request::get("http://icanhazip.com")
             .body(Vec::new())
             .unwrap()
@@ -75,10 +75,10 @@ fn test_keep_alive() {
     )
     .unwrap();
 
-    // read the conn until the second full response is received
+    // receive the conn until the second full response is received
     loop {
         conn.drive().unwrap();
-        if let ReadStatus::Data(r) = conn.read().unwrap() {
+        if let ReceiveOutcome::Payload(r) = conn.receive().unwrap() {
             // validate the response
             assert_eq!(r.status(), StatusCode::OK);
             let body = String::from_utf8_lossy(r.body());

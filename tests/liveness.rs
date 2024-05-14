@@ -4,9 +4,9 @@ use std::{
 };
 
 use nbio::{
+    liveness::{HeartbeatOutcome, HeartbeatingSession, LivenessSession, LivenessStrategy},
     mock::MockSession,
-    util::{HeartbeatResult, HeartbeatingSession, LivenessSession, LivenessStrategy},
-    Session,
+    DriveOutcome, Publish, Receive, Session,
 };
 
 #[test]
@@ -16,8 +16,8 @@ fn test_heartbeat() {
         MockSession::<&[usize], Vec<usize>>::new(),
         Duration::from_millis(50),
         move |s| {
-            s.write(vec![seq.fetch_add(1, Ordering::AcqRel)])?;
-            Ok(HeartbeatResult::Sent)
+            s.publish(vec![seq.fetch_add(1, Ordering::AcqRel)])?;
+            Ok(HeartbeatOutcome::Sent)
         },
     );
 
@@ -34,7 +34,7 @@ fn test_heartbeat() {
         0,
         *sess
             .session_mut()
-            .write_queue
+            .publish_queue
             .pop_front()
             .unwrap()
             .get(0)
@@ -44,13 +44,13 @@ fn test_heartbeat() {
         1,
         *sess
             .session_mut()
-            .write_queue
+            .publish_queue
             .pop_front()
             .unwrap()
             .get(0)
             .unwrap()
     );
-    assert!(sess.session().write_queue.len() <= 3);
+    assert!(sess.session().publish_queue.len() <= 3);
 }
 
 #[test]
@@ -64,16 +64,16 @@ fn test_liveness() {
     // send and drive for longer than interval
     let end = SystemTime::now() + Duration::from_millis(100);
     while SystemTime::now() < end {
-        sess.session_mut().read_queue.push_back(&[0]);
-        sess.read().unwrap();
-        sess.write(&[0]).unwrap();
-        assert!(sess.session_mut().write_queue.pop_front().is_some());
+        sess.session_mut().receive_queue.push_back(&[0]);
+        sess.receive().unwrap();
+        sess.publish(&[0]).unwrap();
+        assert!(sess.session_mut().publish_queue.pop_front().is_some());
         sess.drive().unwrap();
         std::thread::sleep(Duration::from_millis(1));
     }
 
     // assert drive does not report liveness error
-    while sess.drive().unwrap() {}
+    while sess.drive().unwrap() == DriveOutcome::Active {}
     assert!(sess.drive().is_ok());
 
     // drive for longer than interval

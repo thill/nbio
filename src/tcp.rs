@@ -1,6 +1,7 @@
 //! This module provides a TCP [`Session`] implementation and simple [`TcpServer`].
 
 use std::{
+    fmt::Debug,
     io::{Error, ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, ToSocketAddrs},
     time::Duration,
@@ -8,24 +9,27 @@ use std::{
 
 use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TLSConfig, TcpStream};
 
-use crate::{ConnectionStatus, ReadStatus, Session, WriteStatus};
+use crate::{
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
+};
 
 /// Internal state machine of a TCP connection
+#[derive(Debug)]
 enum TcpConnection {
     Connecting(TcpStream),
     MidTlsHandshake(MidHandshakeTlsStream),
     Connected(TcpStream),
 }
 
-/// A [`Session`] that encapsulates a [`TcpStream`].
+/// A [`Session`] that can [`Publish`] and [`Receive`] that encapsulates a [`TcpStream`].
 ///
 /// This implementation does not provide any framing guarantees.
 /// Buffers will be returned as they are read from the underlying sockets.
-/// Writes may be partially completed, with the remaining slice returned as [`WriteStatus::Pending`].
+/// Writes may be partially completed, with the remaining slice returned as [`PublishOutcome::Incomplete`].
 ///
 /// A plain TCP session can be converted to a TLS session by initiating a TLS handshake via [`TcpSession::into_tls`].
 /// The TLS handshake is considered part of the connection process and will be driven to completion by calling the [`Session::drive`] function.
-/// While a TLS handshake is in progress, calls to [`Session::status`] will return [`ConnectionStatus::Connecting`] and calls to `read` and `write` will fail.
+/// While a TLS handshake is in progress, calls to [`Session::status`] will return [`SessionStatus::Establishing`] and calls to `read` and `write` will fail.
 pub struct TcpSession {
     read_buffer: Vec<u8>,
     connection: Option<TcpConnection>,
@@ -71,7 +75,7 @@ impl TcpSession {
 
     /// Start the TLS handshake.
     ///
-    /// While the TLS handshake is in progress, [`Session::status`] will return [`ConnectionStatus::Connecting`].
+    /// While the TLS handshake is in progress, [`Session::status`] will return [`SessionStatus::Connecting`].
     /// The TLS handshake can be driven to completion by calling the [`Session::drive`] function
     pub fn into_tls(mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<Self, Error> {
         let stream = match self.connection.take() {
@@ -156,15 +160,12 @@ impl TcpSession {
     }
 }
 impl Session for TcpSession {
-    type ReadData<'a> = &'a [u8];
-    type WriteData<'a> = &'a [u8];
-
-    fn status(&self) -> ConnectionStatus {
+    fn status(&self) -> SessionStatus {
         match &self.connection {
-            None => ConnectionStatus::Closed,
-            Some(TcpConnection::Connected(_)) => ConnectionStatus::Connected,
+            None => SessionStatus::Terminated,
+            Some(TcpConnection::Connected(_)) => SessionStatus::Established,
             Some(TcpConnection::Connecting(_)) | Some(TcpConnection::MidTlsHandshake(_)) => {
-                ConnectionStatus::Connecting
+                SessionStatus::Establishing
             }
         }
     }
@@ -173,30 +174,30 @@ impl Session for TcpSession {
         self.connection = None
     }
 
-    fn drive(&mut self) -> Result<bool, Error> {
+    fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match self.connection.take() {
             Some(TcpConnection::Connected(x)) => {
                 self.connection = Some(TcpConnection::Connected(x));
-                Ok(false)
+                Ok(DriveOutcome::Idle)
             }
             Some(TcpConnection::Connecting(mut x)) => {
                 if x.try_connect()? {
                     self.connection = Some(TcpConnection::Connected(x));
-                    Ok(true)
+                    Ok(DriveOutcome::Active)
                 } else {
                     self.connection = Some(TcpConnection::Connecting(x));
-                    Ok(false)
+                    Ok(DriveOutcome::Idle)
                 }
             }
             Some(TcpConnection::MidTlsHandshake(x)) => match x.handshake() {
                 Ok(x) => {
                     self.connection = Some(TcpConnection::Connected(x));
-                    Ok(true)
+                    Ok(DriveOutcome::Active)
                 }
                 Err(err) => match err {
                     HandshakeError::WouldBlock(x) => {
                         self.connection = Some(TcpConnection::MidTlsHandshake(x));
-                        Ok(false)
+                        Ok(DriveOutcome::Idle)
                     }
                     HandshakeError::Failure(err) => {
                         self.connection = None;
@@ -207,11 +208,14 @@ impl Session for TcpSession {
             None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         }
     }
+}
+impl Publish for TcpSession {
+    type PublishPayload<'a> = &'a [u8];
 
-    fn write<'a>(
+    fn publish<'a>(
         &mut self,
-        data: Self::WriteData<'a>,
-    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error> {
+        data: Self::PublishPayload<'a>,
+    ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
@@ -225,7 +229,7 @@ impl Session for TcpSession {
         };
         if data.is_empty() {
             // nothing to write, nothing to do
-            return Ok(WriteStatus::Success);
+            return Ok(PublishOutcome::Published);
         }
         let wrote = match stream.write(data) {
             Ok(0) => {
@@ -248,13 +252,33 @@ impl Session for TcpSession {
             },
         };
         if wrote == data.len() {
-            Ok(WriteStatus::Success)
+            Ok(PublishOutcome::Published)
         } else {
-            Ok(WriteStatus::Pending(&data[wrote..]))
+            Ok(PublishOutcome::Incomplete(&data[wrote..]))
         }
     }
-
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, Error> {
+}
+impl Flush for TcpSession {
+    fn flush(&mut self) -> Result<(), Error> {
+        let stream = match self.connection.as_mut() {
+            Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::Connecting(_)) => {
+                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
+            }
+            Some(TcpConnection::MidTlsHandshake(_)) => {
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    "stream is mid-handshake",
+                ))
+            }
+            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
+        };
+        stream.flush()
+    }
+}
+impl Receive for TcpSession {
+    type ReceivePayload<'a> = &'a [u8];
+    fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
@@ -277,29 +301,19 @@ impl Session for TcpSession {
             },
         };
         if read == 0 {
-            Ok(ReadStatus::None)
+            Ok(ReceiveOutcome::Idle)
         } else {
-            Ok(ReadStatus::Data(
+            Ok(ReceiveOutcome::Payload(
                 &mut self.read_buffer.as_mut_slice()[..read],
             ))
         }
     }
-
-    fn flush(&mut self) -> Result<(), Error> {
-        let stream = match self.connection.as_mut() {
-            Some(TcpConnection::Connected(x)) => x,
-            Some(TcpConnection::Connecting(_)) => {
-                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
-            }
-            Some(TcpConnection::MidTlsHandshake(_)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream is mid-handshake",
-                ))
-            }
-            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
-        };
-        stream.flush()
+}
+impl Debug for TcpSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpSession")
+            .field("connection", &self.connection)
+            .finish()
     }
 }
 

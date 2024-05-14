@@ -1,52 +1,60 @@
 //! # Description
 //!
-//! This crate aims to make bi-directional, nonblocking I/O easier to reason about by using patterns that extend beyond dealing directly
-//! with raw bytes, the [`std::io::Read`] and [`std::io::Write`] traits, and [`std::io::ErrorKind::WouldBlock`] errors.
-//! Since this crate's main focus is nonblocking I/O, all [`Session`] implementations provided by this crate are non-blocking by default.
+//! This crate aims to make it easier to reason about uni-directional and bi-directional nonblocking I/O.
+//!
+//! This is done using patterns that extend beyond dealing directly with raw bytes, the [`std::io::Read`] and [`std::io::Write`] traits,
+//! and [`std::io::ErrorKind::WouldBlock`] errors. Since this crate's main focus is nonblocking I/O, all [`Session`] implementations provided
+//! by this crate are non-blocking by default.
 //!
 //! # Sessions
 //!
-//! The core [`Session`] API utilizes associated types to express nonblocking read and write operations.
+//! The core [`Session`] trait encapsulates controlling a single instance of a connection or logical session.
+//! To differentiate with the [`std::io::Read`] and [`std::io::Write`] traits that only deal with raw bytes, this
+//! crate uses [`Publish`] and [`Receive`] terminology, which utilize associated types to handle any payload type.
+//!
+//! A [`Session`] impl is typically also either [`Publish`], [`Receive`], or both.
 //! While the [`tcp`] module provides a [`Session`] implementation that provides unframed non-blocking binary IO operations,
 //! other [`Session`] impls are able to provide significantly more functionality using the same non-blocking patterns.
 //!
+//! This crate will often use the term `Duplex` to distinguish a [`Session`] that is **both** [`Publish`] and [`Receive`].
+//!
 //! # Associated Types
 //!
-//! Sessions operate on implementation-specific [`Session::ReadData`] and [`Session::WriteData`] types.
-//! Instead of populating a mutable buffer provided by the user a-la [`std::io::Read`] operations, a reference to a received event is returned.
-//! This allows [`Session`] implementations to perform internal buffering, framing, and serialization to support implementation-specific types.
+//! Sessions operate on implementation-specific [`Receive::ReceivePayload`] and [`Publish::PublishPayload`] types.
+//! These types are able to utilize a lifetime `'a`, which is tied to the lifetime of the underlying [`Session`],
+//! providing the ability for implementations to reference internal buffers or queues without copying.
 //!
 //! # Errors
 //!
 //! The philosophy of this crate is that an [`Err`] should always represent a transport or protocol-level error.
 //! An [`Err`] should not be returned by a function as a condition that should be handled during **normal** branching logic.
 //! As a result, instead of forcing you to handle [`std::io::ErrorKind::WouldBlock`] everywhere you deal with nonblocking code,
-//! this crate will indicate partial read/write operations using [`ReadStatus::None`], [`ReadStatus::Buffered`], and [`WriteStatus::Pending`]
-//! as [`Result::Ok`].
+//! this crate will indicate partial receive/publish operations using [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Buffered`],
+//! and [`PublishOutcome::Incomplete`] as [`Result::Ok`].
 //!
 //! # Non-Blocking Examples
 //!
 //! ## Streaming TCP
 //!
-//! The following example shows how to use streaming TCP to send and receive a traditional stream of bytes.
+//! The following example shows how to use streaming TCP to publish and receive a traditional stream of bytes.
 //!
 //! ```no_run
-//! use nbio::{ReadStatus, Session, WriteStatus};
+//! use nbio::{ReadOutcome, Session, WriteOutcome};
 //! use nbio::tcp::TcpSession;
 //!
 //! // establish connection
 //! let mut client = TcpSession::connect("192.168.123.456:54321").unwrap();
 //!
-//! // send some bytes until completion
+//! // publish some bytes until completion
 //! let mut remaining_write = "hello world!".as_bytes();
-//! while let WriteStatus::Pending(pending) = client.write(remaining_write).unwrap() {
+//! while let WriteOutcome::Incomplete(pending) = client.write(remaining_write).unwrap() {
 //!     remaining_write = pending;
 //!     client.drive().unwrap();
 //! }
 //!
 //! // print received bytes
 //! loop {
-//!     if let ReadStatus::Data(data) = client.read().unwrap() {
+//!     if let ReadOutcome::Data(data) = client.read().unwrap() {
 //!         println!("received: {data:?}");
 //!     }
 //! }
@@ -54,11 +62,11 @@
 //!
 //! ## Framing TCP
 //!
-//! The following example shows how to [`frame`] messages over TCP to send and receive payloads framed with a preceeding u64 length field.
+//! The following example shows how to [`frame`] messages over TCP to publish and receive payloads framed with a preceeding u64 length field.
 //! Notice how it is almost identical to the code above, except it guarantees that read slices are always identical to their corresponding write slices.
 //!
 //! ```no_run
-//! use nbio::{ReadStatus, Session, WriteStatus};
+//! use nbio::{ReadOutcome, Session, WriteOutcome};
 //! use nbio::tcp::TcpSession;
 //! use nbio::frame::{FramingSession, U64FramingStrategy};
 //!
@@ -66,16 +74,16 @@
 //! let client = TcpSession::connect("192.168.123.456:54321").unwrap();
 //! let mut client = FramingSession::new(client, U64FramingStrategy::new(), 4096);
 //!
-//! // send some bytes until completion
+//! // publish some bytes until completion
 //! let mut remaining_write = "hello world!".as_bytes();
-//! while let WriteStatus::Pending(pending) = client.write(remaining_write).unwrap() {
+//! while let WriteOutcome::Incomplete(pending) = client.write(remaining_write).unwrap() {
 //!     remaining_write = pending;
 //!     client.drive().unwrap();
 //! }
 //!
 //! // print received bytes
 //! loop {
-//!     if let ReadStatus::Data(data) = client.read().unwrap() {
+//!     if let ReadOutcome::Data(data) = client.read().unwrap() {
 //!         println!("received: {data:?}");
 //!     }
 //! }
@@ -89,7 +97,7 @@
 //!
 //! ```no_run
 //! use http::Request;
-//! use nbio::{Session, ReadStatus};
+//! use nbio::{Session, ReadOutcome};
 //! use nbio::http::HttpClient;
 //! use tcp_stream::OwnedTLSConfig;
 //!
@@ -102,7 +110,7 @@
 //! // drive and read the conn until a full response is received
 //! loop {
 //!     conn.drive().unwrap();
-//!     if let ReadStatus::Data(r) = conn.read().unwrap() {
+//!     if let ReadOutcome::Data(r) = conn.read().unwrap() {
 //!         // validate the response
 //!         println!("Response Body: {}", String::from_utf8_lossy(r.body()));
 //!         break;
@@ -118,151 +126,207 @@ pub extern crate tcp_stream;
 pub extern crate tungstenite;
 
 pub mod buffer;
+pub mod compat;
 pub mod frame;
 #[cfg(all(feature = "http"))]
 pub mod http;
+pub mod liveness;
 pub mod mock;
 #[cfg(all(feature = "tcp"))]
 pub mod tcp;
-pub mod util;
 #[cfg(all(feature = "websocket"))]
 pub mod websocket;
 
 use std::{fmt::Debug, io::Error};
 
-/// A bi-directional connection supporting generic read and write events.
+/// An instance of a connection or logical session, which may also support [`Receive`], [`Publish`], or dispatching received events to a [`Callback`]/[`CallbackRef`].
 ///
 /// ## Connecting
 ///
-/// Some implementations may not default to a connected state, in which case immediate calls to `read()` and `write()` will fail.
-/// The [`Session::status`] function provides the connection status, which also checks to make sure any required handshakes are also completed.
-/// When [`Session::status`] returns [`ConnectionStatus::Connecting`], you may drive the connection process via the [`Session::drive()`] function.
+/// Some implementations may not default to an established state, in which case immediate calls to `publish()` and `receive()` will fail.
+/// The [`Session::status`] function provides the current status, which will not return `Established` until all required handshakes are complete.
+/// When [`Session::status`] returns [`SessionStatus::Establishing`], you may drive the connection process via the [`Session::drive`] function.
 ///
 /// ## Retrying
 ///
-/// The [`Ok`] result of `read(..)` and `write(..)` operations may return `None`, `Pending`, or `Buffered`.
-/// These statuses indicate that a read or write operation may need to be retried.
-/// See [`ReadStatus`] and [`WriteStatus`] for more details.
+/// The [`Ok`] result of `publish(..)` and `receive(..)` operations may return [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Buffered`], or [`PublishOutcome::Incomplete`].
+/// These outcomes indicate that an operation may need to be retried. See [`ReceiveOutcome`] and [`PublishOutcome`] for more details.
 ///
 /// ## Duty Cycles
 ///
-/// The `drive(..)` operation is used to finish connecting and to service reading or writing buffered data.
-/// Some [`Session`] implementations will require periodic calls to `drive(..)` in order to function.
-pub trait Session {
-    /// The type returned by the `write(..)` function.
-    type WriteData<'a>
-    where
-        Self: 'a;
-
-    /// The type returned by the `read(..)` function.
-    type ReadData<'a>
-    where
-        Self: 'a;
-
-    /// Check if the session is connected.
+/// The [`Session::drive`] operation is used to finish connecting and to service reading/writing buffered data and to dispatch callbacks.
+/// Most, but not all, [`Session`] implementations will require periodic calls to [`Session::drive`] in order to function.
+/// Implementations that do not require calls to [`Session::drive`] will no-op when it is called.
+///
+/// ## Publishing
+///
+/// Session impls that can publish data will implement [`Publish`].
+///
+/// ## Receiving
+///
+/// Session impls that can receive data via polling implement [`Receive`].
+/// Impls that receive data via callbacks will accept a [`Callback`] or [`CallbackRef`] as input.
+///
+/// For cross-compatibilty between [`Receive`] and [`Callback`]/[`CallbackRef`] paradiagms, see the [`callback`] module.
+/// - [`callback::CallbackQueue`] impls [`Callback`]
+pub trait Session: Debug {
+    /// Check the current session status.
     ///
-    /// If this returns [`ConnectionStatus::Connecting`], use [`Session::drive`] to progress the connection process.
-    fn status(&self) -> ConnectionStatus;
+    /// If this returns [`SessionStatus::Establishing`], use [`Session::drive`] to progress the connection process.
+    fn status(&self) -> SessionStatus;
 
-    /// Force the connection to move to a [`ConnectionStatus::Closed`] state immediately
+    /// Force the session to move to a [`SessionStatus::Terminated`] state immediately, performing any necessary immediately graceful close actions as appropriate.
+    ///
+    /// All subsequent calls to status will return [`SessionStatus::Terminated`] immediately after this function is called.
     fn close(&mut self);
 
-    /// Some implementations will internally buffer messages.
-    /// Those implementations will require `drive(..)` to be called continuously to completely read and/or write data.
-    /// This function will return true if work was done, indicating to any scheduler that more work may be pending.
-    /// When this function returns false, only then should it indicate to a scheduler that yielding or idling is appropriate.
-    fn drive(&mut self) -> Result<bool, Error>;
-
-    /// Write the given `WriteData` to the session.
-    /// This will return [`WriteStatus::Pending`] if the write is not immediately completed fully.
-    fn write<'a>(
-        &mut self,
-        data: Self::WriteData<'a>,
-    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error>;
-
-    /// Attempt to read a `ReadData` from the session.
-    /// This will return [`ReadStatus::Data`] when data has been read.
-    /// [`ReadStatus::Buffered`] can be used to report that work was completed, but data is not ready.
-    /// This means that only [`ReadStatus::None`] should be used to indicate to a scheduler that yielding or idling is appropriate.
-    fn read<'a>(&'a mut self) -> Result<ReadStatus<Self::ReadData<'a>>, Error>;
-
-    /// Flush all pending write data, blocking until completion.
-    fn flush(&mut self) -> Result<(), Error>;
+    /// Some implementations will internally buffer payloads or require a duty cycle to drive callbacks.
+    /// Those implementations will require `drive(..)` to be called continuously to completely publish and/or receive data.
+    /// This function will return [`DriveOutcome::Active`] if work was done, indicating to any scheduler that more work may be pending.
+    /// When this function returns [`DriveOutcome::Idle`], only then should it indicate to a scheduler that yielding or idling is appropriate.
+    fn drive(&mut self) -> Result<DriveOutcome, Error>;
 }
 
-/// Returned by the [`Session::state`] function, providing the current connection state
+/// Returned by the [`Session::status`] function, providing the current connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ConnectionStatus {
-    /// Session attempting to connect or handshake, and will move to `Connected` or `Closed` as [`Session::drive`] is called.
-    Connecting,
-    /// Session is currently connected, and will move `Closed` when an unrecoverable error is encountered
-    Connected,
+pub enum SessionStatus {
+    /// Session attempting to connect, handshake, or otherwise establish, and will move to `Established` or `Terminated` as [`Session::drive`] is called.
+    Establishing,
+    /// Session is currently established, and will move `Terminated` when an unrecoverable error is encountered
+    Established,
     /// Session terminal state, connection has been closed
-    Closed,
+    Terminated,
 }
 
-/// Returned by the [`Session::read`] function, providing the outcome or information about the read action.
-///
-/// The generic type `T` will match the cooresponding [`Session::ReadData`].
-pub enum ReadStatus<T> {
-    /// Contains a reference to data read from the underlying [`Session`]
-    Data(T),
+/// Returned by the [`Session::drive`] function, providing the result of the drive operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DriveOutcome {
+    /// The drive operation resulted in work being done, which means the user should attempt to call [`Session::drive`] again as soon as possible.
+    Active,
+    /// The drive operation did not result in any work being done, which means the user may decide to yield or backoff.
+    Idle,
+}
 
-    /// Data was buffered. This means a partial message was received, but could not be returned as complete `Data`.
+/// A [`Session`] implementation that can receive payloads via polling.
+pub trait Receive: Session {
+    /// The type returned by the `receive(..)` function.
+    type ReceivePayload<'a>
+    where
+        Self: 'a;
+
+    /// Attempt to receive a `payload` from the session.
+    /// This will return [`ReceiveOutcome::Payload`] when data has been received.
+    /// [`ReceiveOutcome::Buffered`] can be used to report that work was completed, but data is not ready.
+    /// This means that only [`ReceiveOutcome::None`] should be used to indicate to a scheduler that yielding or idling is appropriate.
+    fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error>;
+}
+
+/// Returned by the [`Receive::receive`] function, providing the outcome or information about the receive action.
+///
+/// The generic type `T` will match the cooresponding [`Receive::ReceivePayload`].
+pub enum ReceiveOutcome<T> {
+    /// Contains a reference to payload received from the [`Receive::receive`] action.
+    Payload(T),
+
+    /// Data was buffered. This means a partial payload was received, but could not be returned as complete `Data`.
     Buffered,
 
     /// No work was done. This is useful to signal to a scheduler or idle strategy that it may be time to yield.
-    None,
+    Idle,
 }
-impl<T: Debug> Debug for ReadStatus<T> {
+impl<T: Debug> Debug for ReceiveOutcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadStatus::Data(x) => f.write_str(&format!("ReadStatus::Data({x:?})")),
-            ReadStatus::Buffered => f.write_str("ReadStatus::Buffered"),
-            ReadStatus::None => f.write_str("ReadStatus::None"),
+            ReceiveOutcome::Payload(x) => f.write_str(&format!("ReceiveOutcome::Payload({x:?})")),
+            ReceiveOutcome::Buffered => f.write_str("ReceiveOutcome::Buffered"),
+            ReceiveOutcome::Idle => f.write_str("ReceiveOutcome::Idle"),
         }
     }
 }
-impl<T: Clone> Clone for ReadStatus<T> {
+impl<T: Clone> Clone for ReceiveOutcome<T> {
     fn clone(&self) -> Self {
         match self {
-            ReadStatus::Data(x) => ReadStatus::Data(x.clone()),
-            ReadStatus::Buffered => ReadStatus::Buffered,
-            ReadStatus::None => ReadStatus::None,
+            ReceiveOutcome::Payload(x) => ReceiveOutcome::Payload(x.clone()),
+            ReceiveOutcome::Buffered => ReceiveOutcome::Buffered,
+            ReceiveOutcome::Idle => ReceiveOutcome::Idle,
         }
     }
 }
 
-/// Returned by the [`Session::write`] function, providing the outcome of the write action.
-///
-/// The generic type `T` will match the cooresponding [`Session::ReadData`].
-pub enum WriteStatus<T> {
-    /// The write action completed fully
-    Success,
+/// A [`Session`] implementation that can publish payloads.
+pub trait Publish: Session {
+    /// The type given to the `publish(..)` function.
+    type PublishPayload<'a>
+    where
+        Self: 'a;
 
-    /// The write action was not performed or was partially performed.
+    /// Write the given `payload` to the session.
     ///
-    /// The returned reference must be passed back into the [`Session`] `write` function for the write action to complete.
+    /// This will return [`PublishOutcome::Incomplete`] if the publish is not immediately completed fully,
+    /// in which case `T` of `Incomplete(T)` data must be retried.
+    ///
+    /// Note that it is possible for some implementations that a publish is partially complete, so you must
+    /// re-attempt the data encapsulated by `Incomplete`, not the data originally passed into the function.
+    /// This guidance can only be ignored when you are not writing generic code and you know that your
+    /// [`Publish`] impl is "all-or-none".
+    fn publish<'a>(
+        &mut self,
+        payload: Self::PublishPayload<'a>,
+    ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error>;
+}
+
+/// A [`Publish`] implementation that exposes a blocking flush operation.
+pub trait Flush: Publish {
+    /// Flush all pending publish data, blocking until completion.
+    fn flush(&mut self) -> Result<(), Error>;
+}
+
+/// Returned by the [`Publish::publish`] function, providing the outcome of the publish action.
+///
+/// The generic type `T` will match the cooresponding [`Publish::PublishPayload`].
+pub enum PublishOutcome<T> {
+    /// The publish action completed fully
+    Published,
+
+    /// The publish action was not performed or was partially performed.
+    ///
+    /// The returned reference must be passed back into the [`Publish::publish`] function for the publish action to complete.
     /// Whether or not the returned reference may consist of partial data depends on the [`Session`] implementation.
     ///
-    /// If you are looking for a general retry pattern, it is **always** safe to finish the write by passing this returned
-    /// reference back into the `write` function for another attempt, but it is only **sometimes** appropriate to return the entire
-    /// original write reference into the `write` function for a second attempt.
-    Pending(T),
+    /// If you are looking for a general retry pattern, it is **always** safe to finish the publish by passing this returned
+    /// reference back into the `publish` function for another attempt, but it is only **sometimes** appropriate to return the entire
+    /// original publish reference into the `publish` function for a second attempt.
+    Incomplete(T),
 }
-impl<T: Debug> Debug for WriteStatus<T> {
+impl<T: Debug> Debug for PublishOutcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WriteStatus::Success => f.write_str("WriteStatus::Success"),
-            WriteStatus::Pending(x) => f.write_str(&format!("WriteStatus::Pending({x:?})")),
+            PublishOutcome::Published => f.write_str("PublishOutcome::Published"),
+            PublishOutcome::Incomplete(x) => {
+                f.write_str(&format!("PublishOutcome::Incomplete({x:?})"))
+            }
         }
     }
 }
-impl<T: Clone> Clone for WriteStatus<T> {
+impl<T: Clone> Clone for PublishOutcome<T> {
     fn clone(&self) -> Self {
         match self {
-            WriteStatus::Success => WriteStatus::Success,
-            WriteStatus::Pending(x) => WriteStatus::Pending(x.clone()),
+            PublishOutcome::Published => PublishOutcome::Published,
+            PublishOutcome::Incomplete(x) => PublishOutcome::Incomplete(x.clone()),
         }
     }
+}
+
+/// Used by push-oriented receivers to handle moved payloads as they are received.
+///
+/// See the [`compat`] module for [`Receive`] compatibility
+pub trait Callback<T> {
+    fn callback(&mut self, payload: T);
+}
+
+/// Used by push-oriented receivers to handle payload references as they are received.
+///
+/// See the [`compat`] module for [`Receive`] compatibility
+pub trait CallbackRef<T: ?Sized> {
+    fn callback_ref(&mut self, payload: &T);
 }

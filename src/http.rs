@@ -1,5 +1,6 @@
 //! A non-blocking HTTP client
 use std::{
+    fmt::Debug,
     io::{self, Error, ErrorKind, Read},
     mem::swap,
     str::FromStr,
@@ -13,9 +14,9 @@ use tcp_stream::{OwnedTLSConfig, TLSConfig, TcpStream};
 
 use crate::{
     buffer::GrowableCircleBuf,
-    frame::{DeserializedFrame, FramingSession, FramingStrategy},
+    frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
-    ConnectionStatus, Session, WriteStatus,
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, Session, SessionStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,7 +50,7 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 
 /// A simple non-blocking HTTP 1.x client
 ///
-/// Calling `connect(..)` or `request(..)` will return a [`HttpClientSession`], which encapsulates a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
+/// Calling `connect(..)` or `request(..)` will return a [`HttpClientSession`], which encapsulates a [`FrameDuplex`] utilizing an HTTP [`FramingStrategy`].
 /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
 ///
 /// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will pre-buffer the serialized request.
@@ -64,7 +65,7 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 /// To open a connection without an immeidate pending [`hyperium_http::Request`], use [`HttpClient::connect`], which simply opens a persistent connection.
 ///
 /// [`HttpClient::connect`] will open a persistent [`HttpClientSession`] to the given domain. This connection must call [`Session::drive()`] until [`Session::status`]
-/// returns [`ConnectionStatus::Connected`], at which point the session can send multiple [`hyperium_http::Request`] payloads and receive [`hyperium_http::Response`] payloads utilizing HTTP "keep-alive".
+/// returns [`SessionStatus::Connected`], at which point the session can send multiple [`hyperium_http::Request`] payloads and receive [`hyperium_http::Response`] payloads utilizing HTTP "keep-alive".
 ///
 /// ## Example
 ///
@@ -109,12 +110,12 @@ impl HttpClient {
 
     /// Initiate a new HTTP connection that is ready for a new request.
     ///
-    /// This will return a [`HttpClientSession`], which encapsulates a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
+    /// This will return a [`HttpClientSession`], which encapsulates a [`FrameDuplex`] utilizing an HTTP [`FramingStrategy`].
     /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
     ///
     /// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will have pre-buffered the serialized request request.
     /// Before calling `read`/`write`, call [`Session::drive()`] to finish connecting and complete any pending TLS handshakes until [`Session::status`]
-    /// returns [`ConnectionStatus::Connected`].
+    /// returns [`SessionStatus::Connected`].
     ///
     /// For now, this only supports HTTP 1.x.
     pub fn connect(
@@ -127,16 +128,17 @@ impl HttpClient {
         if scheme == Scheme::Https {
             conn = conn.into_tls(&host, self.tls_config.as_ref())?;
         }
-        Ok(HttpClientSession::new(FramingSession::new(
+        Ok(HttpClientSession::new(FrameDuplex::new(
             conn,
-            Http1FramingStrategy::new(),
+            Http1ResponseDeserializer::new(),
+            Http1RequestSerializer::new(),
             0,
         )))
     }
 
     /// Initiate a new HTTP connection that will send the given request.
     ///
-    /// This will return a [`HttpClientSession`], which encapsulates a [`FramingSession`] utilizing an HTTP [`FramingStrategy`].
+    /// This will return a [`HttpClientSession`], which encapsulates a [`FrameDuplex`] utilizing an HTTP [`FramingStrategy`].
     /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
     ///
     /// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will have pre-buffered the serialized request request.
@@ -149,15 +151,27 @@ impl HttpClient {
     ) -> Result<HttpClientSession, io::Error> {
         let (parts, body) = request.into_parts();
         let request = hyperium_http::Request::from_parts(parts, body.into_body());
+        let scheme = match request.uri().scheme_str() {
+            None => Scheme::Http,
+            Some("http") => Scheme::Http,
+            Some("https") => Scheme::Https,
+            _ => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "bad http uri scheme",
+                ))
+            }
+        };
         let stream = connect_stream(
-            request.uri().scheme_str(),
+            scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
             self.tls_config.as_ref(),
         )?;
-        let mut conn = HttpClientSession::new(FramingSession::new(
+        let mut conn = HttpClientSession::new(FrameDuplex::new(
             TcpSession::new(stream)?,
-            Http1FramingStrategy::new(),
+            Http1ResponseDeserializer::new(),
+            Http1RequestSerializer::new(),
             0,
         ));
         conn.pending_initial_request = Some(request.into());
@@ -172,17 +186,11 @@ impl Default for HttpClient {
 }
 
 pub(crate) fn connect_stream(
-    scheme: Option<&str>,
+    scheme: Scheme,
     host: Option<&str>,
     port: Option<u16>,
     tls_config: TLSConfig<'_, '_, '_>,
 ) -> Result<TcpStream, Error> {
-    let scheme = match scheme {
-        None => Scheme::Http,
-        Some("http") => Scheme::Http,
-        Some("https") => Scheme::Https,
-        _ => return Err(io::Error::new(ErrorKind::InvalidData, "bad uri scheme")),
-    };
     let host = match host {
         Some(x) => x.to_owned(),
         None => return Err(io::Error::new(ErrorKind::InvalidData, "missing host")),
@@ -200,17 +208,18 @@ pub(crate) fn connect_stream(
     Ok(conn)
 }
 
-// pub type HttpClientSession = FramingSession<TcpSession, Http1FramingStrategy>;
 /// A [`Session`] created by the [`HttpClient`].
 ///
-/// This encapsulates a [`FramingSession<TcpSession, Http1FramingStrategy>`] and allows a single [`hyperium_http::Request`]
-/// to be enqueued prior to a successful connection, supporting the [`HttpClient::request`] function.
+/// This encapsulates a [`FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>`] and allows a single
+/// [`hyperium_http::Request`] to be enqueued prior to a successful connection, supporting the [`HttpClient::request`] function.
 pub struct HttpClientSession {
-    session: FramingSession<TcpSession, Http1FramingStrategy>,
+    session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
     pending_initial_request: Option<HttpRequest>,
 }
 impl HttpClientSession {
-    pub fn new(session: FramingSession<TcpSession, Http1FramingStrategy>) -> Self {
+    pub fn new(
+        session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
+    ) -> Self {
         Self {
             session,
             pending_initial_request: None,
@@ -218,10 +227,7 @@ impl HttpClientSession {
     }
 }
 impl Session for HttpClientSession {
-    type ReadData<'a> = hyperium_http::Response<Vec<u8>>;
-    type WriteData<'a> = HttpRequest;
-
-    fn status(&self) -> crate::ConnectionStatus {
+    fn status(&self) -> crate::SessionStatus {
         self.session.status()
     }
 
@@ -229,49 +235,63 @@ impl Session for HttpClientSession {
         self.session.close()
     }
 
-    fn drive(&mut self) -> Result<bool, Error> {
-        let mut result = self.session.drive()?;
-        if self.session.status() == ConnectionStatus::Connected
+    fn drive(&mut self) -> Result<DriveOutcome, Error> {
+        let mut result: crate::DriveOutcome = self.session.drive()?;
+        if self.session.status() == SessionStatus::Established
             && self.pending_initial_request.is_some()
         {
-            let wrote = match self.session.write(
+            let wrote = match self.session.publish(
                 self.pending_initial_request
                     .take()
                     .expect("checked pending_request"),
             )? {
-                WriteStatus::Success => true,
-                WriteStatus::Pending(x) => {
+                PublishOutcome::Published => true,
+                PublishOutcome::Incomplete(x) => {
                     self.pending_initial_request = Some(x);
                     false
                 }
             };
             if wrote {
                 self.pending_initial_request = None;
-                result |= true;
+                result = DriveOutcome::Active;
             }
         }
         Ok(result)
     }
+}
+impl Receive for HttpClientSession {
+    type ReceivePayload<'a> = hyperium_http::Response<Vec<u8>>;
 
-    fn write<'a>(
-        &mut self,
-        data: Self::WriteData<'a>,
-    ) -> Result<WriteStatus<Self::WriteData<'a>>, Error> {
-        self.session.write(data)
-    }
-
-    fn read<'a>(&'a mut self) -> Result<crate::ReadStatus<Self::ReadData<'a>>, Error> {
-        if self.pending_initial_request.is_none() && self.status() == ConnectionStatus::Connected {
+    fn receive<'a>(&'a mut self) -> Result<crate::ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
+        if self.pending_initial_request.is_none() && self.status() == SessionStatus::Established {
             // make the request/response model more straightforward by not requiring checks to `status()` before calling `read`.
             // `self.pending_initial_request.is_none()`: only do this when an initial request is pending, otherwise revert to default `read` behavior for persistent streams.
-            self.session.read()
+            self.session.receive()
         } else {
-            Ok(crate::ReadStatus::None)
+            Ok(crate::ReceiveOutcome::Idle)
         }
     }
+}
+impl Publish for HttpClientSession {
+    type PublishPayload<'a> = HttpRequest;
 
+    fn publish<'a>(
+        &mut self,
+        data: Self::PublishPayload<'a>,
+    ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
+        self.session.publish(data)
+    }
+}
+impl Flush for HttpClientSession {
     fn flush(&mut self) -> Result<(), Error> {
         self.session.flush()
+    }
+}
+impl Debug for HttpClientSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpClientSession")
+            .field("session", &self.session)
+            .finish()
     }
 }
 
@@ -322,13 +342,13 @@ impl BodyInfo {
     }
 }
 
-/// A [`FramingStrategy`] for HTTP 1.x where [`FramingStrategy::WriteFrame`] is an [`http::Request`], and the [`FramingStrategy::ReadFrame`] is an [`http::Response`].
-pub struct Http1FramingStrategy {
+/// A [`DeserializeFrame`] impl for HTTP 1.x where [`DeserializeFrame::DeserializedFrame`] is an [`http::Response`].
+pub struct Http1ResponseDeserializer {
     deserialized_response: Option<hyperium_http::Response<Vec<u8>>>,
     deserialized_size: usize,
     body_info: Option<BodyInfo>,
 }
-impl Http1FramingStrategy {
+impl Http1ResponseDeserializer {
     pub fn new() -> Self {
         Self {
             deserialized_response: None,
@@ -337,9 +357,8 @@ impl Http1FramingStrategy {
         }
     }
 }
-impl FramingStrategy for Http1FramingStrategy {
-    type ReadFrame<'a> = hyperium_http::Response<Vec<u8>>;
-    type WriteFrame<'a> = HttpRequest;
+impl DeserializeFrame for Http1ResponseDeserializer {
+    type DeserializedFrame<'a> = hyperium_http::Response<Vec<u8>>;
 
     fn check_deserialize_frame(&mut self, data: &[u8], eof: bool) -> Result<bool, Error> {
         if self.deserialized_response.is_none() {
@@ -448,21 +467,32 @@ impl FramingStrategy for Http1FramingStrategy {
     fn deserialize_frame<'a>(
         &'a mut self,
         _data: &'a [u8],
-    ) -> Result<crate::frame::DeserializedFrame<Self::ReadFrame<'a>>, Error> {
+    ) -> Result<crate::frame::SizedFrame<Self::DeserializedFrame<'a>>, Error> {
         // return response that was deserialized in `check_deserialize_frame(..)`
-        Ok(DeserializedFrame::new(
+        Ok(SizedFrame::new(
             self.deserialized_response
                 .take()
                 .ok_or_else(|| Error::new(ErrorKind::Other, "no deserialized frame"))?,
             self.deserialized_size,
         ))
     }
+}
 
-    fn write_frame<'a>(
+/// A [`SerializeFrame`] impl for HTTP 1.x where [`SerializeFrame::SerializedFrame`] is an [`HttpRequest`].
+pub struct Http1RequestSerializer {}
+impl Http1RequestSerializer {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+impl SerializeFrame for Http1RequestSerializer {
+    type SerializedFrame<'a> = HttpRequest;
+
+    fn serialize_frame<'a>(
         &mut self,
-        request: Self::WriteFrame<'a>,
+        request: Self::SerializedFrame<'a>,
         buffer: &mut GrowableCircleBuf,
-    ) -> Result<WriteStatus<Self::WriteFrame<'a>>, Error> {
+    ) -> Result<PublishOutcome<Self::SerializedFrame<'a>>, Error> {
         let serialized_request = match request {
             HttpRequest::Request(request) => {
                 // check version
@@ -538,9 +568,9 @@ impl FramingStrategy for Http1FramingStrategy {
 
         // returned pending request
         if buffer.try_write(&vec![&serialized_request])? {
-            Ok(WriteStatus::Success)
+            Ok(PublishOutcome::Published)
         } else {
-            Ok(WriteStatus::Pending(HttpRequest::Serialized(
+            Ok(PublishOutcome::Incomplete(HttpRequest::Serialized(
                 serialized_request,
             )))
         }

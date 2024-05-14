@@ -1,7 +1,7 @@
 use nbio::{
-    frame::{FramingSession, U64FramingStrategy},
+    frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer},
     tcp::{TcpServer, TcpSession},
-    ReadStatus, Session, WriteStatus,
+    Publish, PublishOutcome, Receive, ReceiveOutcome, Session,
 };
 
 #[test]
@@ -11,38 +11,48 @@ fn one_small_frame() {
     let client = TcpSession::connect("127.0.0.1:34001").unwrap();
     let session = server.accept().unwrap().unwrap().0;
 
-    let mut client = FramingSession::new(client, U64FramingStrategy::new(), 1024);
-    let mut session = FramingSession::new(session, U64FramingStrategy::new(), 1024);
+    let mut client = FrameDuplex::new(
+        client,
+        U64FrameDeserializer::new(),
+        U64FrameSerializer::new(),
+        1024,
+    );
+    let mut session = FrameDuplex::new(
+        session,
+        U64FrameDeserializer::new(),
+        U64FrameSerializer::new(),
+        1024,
+    );
 
-    // construct read holder and a large payload to write
-    let mut read_payload = None;
-    let mut write_payload = Vec::new();
+    // construct receive holder and a large payload to publish
+    let mut receive_payload = None;
+    let mut publish_payload = Vec::new();
     for i in 0..512 {
-        write_payload.push(i as u8)
+        publish_payload.push(i as u8)
     }
 
-    // send the message with the client while reading it with the server session
-    let mut remaining = write_payload.as_slice();
-    while let WriteStatus::Pending(pw) = client.write(remaining).unwrap() {
+    // send the message with the client while receiveing it with the server session
+    let mut remaining = publish_payload.as_slice();
+    while let PublishOutcome::Incomplete(pw) = client.publish(remaining).unwrap() {
         remaining = pw;
         client.drive().unwrap();
-        if let ReadStatus::Data(read) = session.read().unwrap() {
-            read_payload = Some(Vec::from(read));
+        if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
+            receive_payload = Some(Vec::from(receive));
         }
     }
 
-    // drive write from client while reading single payload from session
-    while let None = read_payload {
+    // drive publish from client while receiveing single payload from session
+    while let None = receive_payload {
         client.drive().unwrap();
-        if let ReadStatus::Data(read) = session.read().unwrap() {
-            read_payload = Some(Vec::from(read));
+        if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
+            receive_payload = Some(Vec::from(receive));
         }
     }
-    let read_payload = read_payload.unwrap();
+    let receive_payload = receive_payload.unwrap();
 
     // validate the received message
-    assert_eq!(read_payload.len(), write_payload.len());
-    assert_eq!(read_payload, write_payload);
+    assert_eq!(receive_payload.len(), publish_payload.len());
+    assert_eq!(receive_payload, publish_payload);
 }
 
 #[test]
@@ -52,37 +62,47 @@ fn one_large_frame() {
     let client = TcpSession::connect("127.0.0.1:34002").unwrap();
     let session = server.accept().unwrap().unwrap().0;
 
-    let mut client = FramingSession::new(client, U64FramingStrategy::new(), 1024);
-    let mut session = FramingSession::new(session, U64FramingStrategy::new(), 1024);
+    let mut client = FrameDuplex::new(
+        client,
+        U64FrameDeserializer::new(),
+        U64FrameSerializer::new(),
+        1024,
+    );
+    let mut session = FrameDuplex::new(
+        session,
+        U64FrameDeserializer::new(),
+        U64FrameSerializer::new(),
+        1024,
+    );
 
-    // construct read holder and payload larger than the write buffer
-    let mut read_payload = None;
-    let mut write_payload = Vec::new();
+    // construct receive holder and payload larger than the publish buffer
+    let mut receive_payload = None;
+    let mut publish_payload = Vec::new();
     for i in 0..888888 {
-        write_payload.push(i as u8)
+        publish_payload.push(i as u8)
     }
 
-    // send the message with the client while reading it with the server session
-    let mut remaining = write_payload.as_slice();
-    while let WriteStatus::Pending(pw) = client.write(remaining).unwrap() {
+    // send the message with the client while receiveing it with the server session
+    let mut remaining = publish_payload.as_slice();
+    while let PublishOutcome::Incomplete(pw) = client.publish(remaining).unwrap() {
         remaining = pw;
-        if let ReadStatus::Data(read) = session.read().unwrap() {
-            read_payload = Some(Vec::from(read));
+        if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
+            receive_payload = Some(Vec::from(receive));
         }
     }
 
-    // drive write from client while reading single payload from session
-    while let None = read_payload {
+    // drive publish from client while receiveing single payload from session
+    while let None = receive_payload {
         client.drive().unwrap();
-        if let ReadStatus::Data(read) = session.read().unwrap() {
-            read_payload = Some(Vec::from(read));
+        if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
+            receive_payload = Some(Vec::from(receive));
         }
     }
-    let read_payload = read_payload.unwrap();
+    let receive_payload = receive_payload.unwrap();
 
     // validate the received message
-    assert_eq!(read_payload.len(), write_payload.len());
-    assert_eq!(read_payload, write_payload);
+    assert_eq!(receive_payload.len(), publish_payload.len());
+    assert_eq!(receive_payload, publish_payload);
 }
 
 #[test]
@@ -92,39 +112,49 @@ fn framing_slow_consumer() {
     let client = TcpSession::connect("127.0.0.1:34003").unwrap();
     let session = server.accept().unwrap().unwrap().0;
 
-    // use a small write buffer to stress test
-    let mut client = FramingSession::new(client, U64FramingStrategy::new(), 1024);
-    let mut session = FramingSession::new(session, U64FramingStrategy::new(), 1024);
+    // use a small publish buffer to stress test
+    let mut client = FrameDuplex::new(
+        client,
+        U64FrameDeserializer::new(),
+        U64FrameSerializer::new(),
+        1024,
+    );
+    let mut session = FrameDuplex::new(
+        session,
+        U64FrameDeserializer::new(),
+        U64FrameSerializer::new(),
+        1024,
+    );
 
-    // send 100,000 messages with client while "slowly" reading with session
+    // send 100,000 messages with client while "slowly" receiveing with session
     let mut received = Vec::new();
     let mut backpressure = false;
     for i in 0..100000 {
         let m = format!("test test test test hello world {i:06}!");
-        // send the message with the client while reading it with the server session
+        // send the message with the client while receiveing it with the server session
         let mut remaining = m.as_bytes();
-        while let WriteStatus::Pending(pw) = client.write(remaining).unwrap() {
+        while let PublishOutcome::Incomplete(pw) = client.publish(remaining).unwrap() {
             client.drive().unwrap();
             remaining = pw;
             backpressure = true;
-            // only read when backpressure is encountered to simulate a slow consumer
+            // only receive when backpressure is encountered to simulate a slow consumer
             for _ in 0..10 {
-                if let ReadStatus::Data(read) = session.read().unwrap() {
-                    received.push(String::from_utf8_lossy(read).to_string());
+                if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
+                    received.push(String::from_utf8_lossy(receive).to_string());
                 }
             }
         }
         client.drive().unwrap();
     }
 
-    // assert backpressure and write failures were tested
+    // assert backpressure and publish failures were tested
     assert!(backpressure);
 
-    // finish reading with session until all 100,000 messages were received while driving client to write completion
+    // finish receiveing with session until all 100,000 messages were received while driving client to publish completion
     while received.len() < 100000 {
         client.drive().unwrap();
-        if let ReadStatus::Data(read) = session.read().unwrap() {
-            received.push(String::from_utf8_lossy(read).to_string());
+        if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
+            received.push(String::from_utf8_lossy(receive).to_string());
         }
     }
 
