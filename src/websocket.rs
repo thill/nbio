@@ -30,6 +30,8 @@ use self::inner::{Frame, Payload};
 pub type ClientRequest = tungstenite::handshake::client::Request;
 pub type ClientResponse = tungstenite::handshake::client::Response;
 
+/// Encapsulates a [`TcpSession`] in a [`FrameDuplex`] that serializes/deserializes a WebSocket [`Message`]
+/// and provides WebSocket handshake functionality while [`SessionStatus::Establishing`] the session.
 pub struct WebSocketSession {
     handshake: Option<PendingHandshake>,
     session: Option<FrameDuplex<TcpSession, WebSocketFrameDeserializer, WebSocketFrameSerializer>>,
@@ -537,13 +539,10 @@ impl DeserializeFrame for WebSocketFrameDeserializer {
     }
 }
 
-pub struct WebSocketFrameSerializer {
-    /// optionally used to assemble fragmented data frames
-    fragments: Option<FragmentBuffer>,
-}
+pub struct WebSocketFrameSerializer {}
 impl WebSocketFrameSerializer {
     pub fn new() -> Self {
-        Self { fragments: None }
+        Self {}
     }
 }
 impl Default for WebSocketFrameSerializer {

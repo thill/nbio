@@ -70,7 +70,7 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 /// ## Example
 ///
 /// ```no_run
-/// use nbio::{Session, ReadStatus};
+/// use nbio::{Receive, ReceiveOutcome, Session};
 /// use nbio::http::HttpClient;
 /// use nbio::hyperium_http::Request;
 /// use nbio::tcp_stream::OwnedTLSConfig;
@@ -84,7 +84,7 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 /// // drive and read the conn until a full response is received
 /// loop {
 ///     conn.drive().unwrap();
-///     if let ReadStatus::Data(r) = conn.read().unwrap() {
+///     if let ReceiveOutcome::Payload(r) = conn.receive().unwrap() {
 ///         // validate the response
 ///         println!("Response Body: {}", String::from_utf8_lossy(r.body()));
 ///         break;
@@ -407,7 +407,7 @@ impl DeserializeFrame for Http1ResponseDeserializer {
             Some(body_info) => {
                 match body_info.ty {
                     BodyType::ChunkedTransfer => {
-                        // TODO: determine better way to see if all chunks have been received, deserializer does not support this
+                        // TODO: determine better way to see if all chunks have been received
                         // TODO: cache offset of last read chunk to avoid re-parsing entire body every time
                         if body_info.offset < data.len() && ends_with_ascii(data, "\r\n\r\n") {
                             let mut body = Vec::new();

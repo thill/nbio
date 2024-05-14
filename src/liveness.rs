@@ -263,8 +263,8 @@ where
 ///
 /// A builder pattern is provided to enable a combination of checks with one line of code:
 /// ```
-/// use nbio::util::LivenessStrategy;
-/// let strat = LivenessStrategy::new().with_read(true).with_write(true);
+/// use nbio::liveness::LivenessStrategy;
+/// let strat = LivenessStrategy::new().with_receive(true).with_publish(true);
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct LivenessStrategy {
