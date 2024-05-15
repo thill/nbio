@@ -142,7 +142,7 @@ and [`websocket::WebSocketFrameDeserializer`]. All TLS and WebSocket handshaking
 use nbio::{Publish, PublishOutcome, Receive, Session, SessionStatus, ReceiveOutcome};
 use nbio::websocket::{Message, WebSocketSession};
 
-// create the client and make the request
+// connect and drive the handshake
 let mut session = WebSocketSession::connect("wss://echo.websocket.org/", None).unwrap();
 while session.status() == SessionStatus::Establishing {
      session.drive().unwrap();
