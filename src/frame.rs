@@ -1,4 +1,4 @@
-//! [`Receive`] and [`Publish`] utilities that serialize and deserialize payloads on underlying binary sessions.
+//! [`Receive`] and [`Publish`] implementations that serialize and deserialize payloads on underlying binary sessions.
 //!
 //! ## Implementations
 //!

@@ -1,3 +1,4 @@
+//! Provides a WebSocket [`Session`] that encapsulates an underlying [`TcpSession`]
 use std::{
     borrow::Cow,
     collections::VecDeque,

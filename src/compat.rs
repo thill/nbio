@@ -1,4 +1,4 @@
-//! A collection of impls that provide cross-compatibility between usage patterns and formats
+//! A collection of impls that provide cross-compatibility between different usage patterns and payload types.
 use std::{
     cell::RefCell,
     collections::LinkedList,

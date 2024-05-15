@@ -1,4 +1,4 @@
-//! Internal data structures
+//! Internal data structure used for buffering raw bytes
 
 use std::io::{Error, ErrorKind, Write};
 

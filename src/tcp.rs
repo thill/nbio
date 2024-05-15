@@ -1,4 +1,4 @@
-//! This module provides a TCP [`Session`] implementation and simple [`TcpServer`].
+//! Provides a TCP [`Session`] implementation and simple [`TcpServer`]
 
 use std::{
     fmt::Debug,
