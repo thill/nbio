@@ -1,13 +1,13 @@
 [package]
 name = "nbio"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Eric Thill"]
 repository = "https://github.com/thill/nbio"
 description = "Non-Blocking I/O"
 keywords = ["tcp", "http", "nonblocking"]
-categories = ["rust-patterns"]
+categories = ["concurrency", "rust-patterns"]
 exclude = ["Cargo.lock"]
 
 [features]
