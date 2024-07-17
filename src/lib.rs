@@ -35,13 +35,20 @@
 //! # Features
 //!
 //! The [`Session`] impls in this crate are enabled by certain features.
-//! By default, all features are enabled for rapid prototyping.
+//! By default, features that do not require a special build environment are enabled for rapid prototyping.
 //! In a production codebase, you will likey want to pick and choose your required features.
 //!
 //! Feature list:
+//! - `aeron`
+//! - `crossbeam`
 //! - `http`
+//! - `mock`
+//! - `mpsc`
 //! - `tcp`
 //! - `websocket`
+//!
+//! Features not enabled by default:
+//! - `aeron`: requires `cmake` and `clang`.
 //!
 //! # Examples
 //!
@@ -163,6 +170,8 @@
 //! }
 //! ```
 
+#[cfg(any(feature = "crossbeam"))]
+pub extern crate crossbeam_channel;
 #[cfg(any(feature = "http"))]
 pub extern crate http as hyperium_http;
 #[cfg(any(feature = "tcp"))]
@@ -170,13 +179,20 @@ pub extern crate tcp_stream;
 #[cfg(any(feature = "websocket"))]
 pub extern crate tungstenite;
 
+#[cfg(any(feature = "aeron"))]
+pub mod aeron;
 pub mod buffer;
 pub mod compat;
+#[cfg(any(feature = "crossbeam"))]
+pub mod crossbeam;
 pub mod frame;
 #[cfg(any(feature = "http"))]
 pub mod http;
 pub mod liveness;
+#[cfg(any(feature = "mock"))]
 pub mod mock;
+#[cfg(any(feature = "mpsc"))]
+pub mod mpsc;
 #[cfg(any(feature = "tcp"))]
 pub mod tcp;
 #[cfg(any(feature = "websocket"))]
@@ -219,11 +235,6 @@ pub trait Session: Debug {
     ///
     /// If this returns [`SessionStatus::Establishing`], use [`Session::drive`] to progress the connection process.
     fn status(&self) -> SessionStatus;
-
-    /// Force the session to move to a [`SessionStatus::Terminated`] state immediately, performing any necessary immediately graceful close actions as appropriate.
-    ///
-    /// All subsequent calls to status will return [`SessionStatus::Terminated`] immediately after this function is called.
-    fn close(&mut self);
 
     /// Some implementations will internally buffer payloads or require a duty cycle to drive callbacks.
     /// Those implementations will require `drive(..)` to be called continuously to completely publish and/or receive data.
@@ -343,6 +354,20 @@ pub enum PublishOutcome<T> {
     /// original publish reference into the `publish` function for a second attempt.
     Incomplete(T),
 }
+impl<T> PublishOutcome<T> {
+    pub fn is_published(&self) -> bool {
+        match self {
+            PublishOutcome::Published => true,
+            PublishOutcome::Incomplete(_) => false,
+        }
+    }
+    pub fn is_incomplete(&self) -> bool {
+        match self {
+            PublishOutcome::Published => false,
+            PublishOutcome::Incomplete(_) => true,
+        }
+    }
+}
 impl<T: Debug> Debug for PublishOutcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -368,10 +393,38 @@ impl<T: Clone> Clone for PublishOutcome<T> {
 pub trait Callback<T> {
     fn callback(&mut self, payload: T);
 }
+impl<T, F: FnMut(T)> Callback<T> for F {
+    fn callback(&mut self, payload: T) {
+        self(payload)
+    }
+}
+impl<T> Callback<T> for () {
+    fn callback(&mut self, _payload: T) {}
+}
 
 /// Used by push-oriented receivers to handle payload references as they are received.
 ///
 /// See the [`compat`] module for [`Receive`] compatibility
 pub trait CallbackRef<T: ?Sized> {
     fn callback_ref(&mut self, payload: &T);
+
+    /// Compatibility helper to convert any `CallbackRef` into a [`Callback`] when `T` is [`Sized`].
+    ///
+    /// This provides maximum compatibility when ownership of `T` is not required, as it allows users
+    /// to always implement [`CallbackRef`] which can then be used in either circumstance.
+    fn into_callback(mut self) -> impl Callback<T>
+    where
+        Self: Sized,
+        T: Sized,
+    {
+        move |x| self.callback_ref(&x)
+    }
+}
+impl<T: ?Sized, F: FnMut(&T)> CallbackRef<T> for F {
+    fn callback_ref(&mut self, payload: &T) {
+        self(payload)
+    }
+}
+impl<T> CallbackRef<T> for () {
+    fn callback_ref(&mut self, _payload: &T) {}
 }

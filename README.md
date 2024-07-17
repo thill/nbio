@@ -37,13 +37,20 @@ and [`PublishOutcome::Incomplete`] as [`Result::Ok`].
 ## Features
 
 The [`Session`] impls in this crate are enabled by certain features.
-By default, all features are enabled for rapid prototyping.
+By default, features that do not require a special build environment are enabled for rapid prototyping.
 In a production codebase, you will likey want to pick and choose your required features.
 
 Feature list:
+- `aeron`
+- `crossbeam`
 - `http`
+- `mock`
+- `mpsc`
 - `tcp`
 - `websocket`
+
+Features not enabled by default:
+- `aeron`: requires `cmake` and `clang`.
 
 ## Examples
 

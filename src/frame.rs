@@ -100,10 +100,6 @@ where
         self.session.status()
     }
 
-    fn close(&mut self) {
-        self.session.close()
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         let mut outcome = self.session.drive()?;
         if self.write_buffer.is_empty() {
@@ -262,10 +258,6 @@ where
         self.session.status()
     }
 
-    fn close(&mut self) {
-        self.session.close()
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         let mut outcome = self.session.drive()?;
         if self.write_buffer.is_empty() {
@@ -373,10 +365,6 @@ where
 {
     fn status(&self) -> crate::SessionStatus {
         self.session.status()
-    }
-
-    fn close(&mut self) {
-        self.session.close()
     }
 
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {

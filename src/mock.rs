@@ -46,10 +46,6 @@ where
         self.status
     }
 
-    fn close(&mut self) {
-        self.status = SessionStatus::Terminated
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         if self.status == SessionStatus::Terminated {
             return Err(Error::new(ErrorKind::NotConnected, "terminated"));

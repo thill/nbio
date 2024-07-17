@@ -116,11 +116,6 @@ impl Session for WebSocketSession {
         }
     }
 
-    fn close(&mut self) {
-        self.handshake = None;
-        self.session = None;
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match &mut self.session {
             None => match self.handshake.take() {

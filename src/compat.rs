@@ -84,9 +84,6 @@ where
     MapFunc: for<'a> Fn(Sess::ReceivePayload<'a>) -> ReceivePayload,
     Sess: Receive,
 {
-    fn close(&mut self) {
-        self.session.close()
-    }
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         self.session.drive()
     }
@@ -198,9 +195,6 @@ where
     Sess: Session,
     QueueImpl: Queue<Payload>,
 {
-    fn close(&mut self) {
-        self.session.close()
-    }
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         self.session.drive()
     }
@@ -351,9 +345,6 @@ where
     R: Receive,
     C: for<'a> Callback<R::ReceivePayload<'a>> + 'static,
 {
-    fn close(&mut self) {
-        self.session.close()
-    }
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         let mut outcome = self.session.drive()?;
         if let ReceiveOutcome::Payload(data) = self.session.receive()? {
@@ -420,9 +411,6 @@ where
     R: Receive,
     C: for<'a> CallbackRef<R::ReceivePayload<'a>> + 'static,
 {
-    fn close(&mut self) {
-        self.session.close()
-    }
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         let mut outcome = self.session.drive()?;
         if let ReceiveOutcome::Payload(data) = self.session.receive()? {

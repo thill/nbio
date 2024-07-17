@@ -231,10 +231,6 @@ impl Session for HttpClientSession {
         self.session.status()
     }
 
-    fn close(&mut self) {
-        self.session.close()
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         let mut result: crate::DriveOutcome = self.session.drive()?;
         if self.session.status() == SessionStatus::Established

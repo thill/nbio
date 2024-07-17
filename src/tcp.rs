@@ -170,10 +170,6 @@ impl Session for TcpSession {
         }
     }
 
-    fn close(&mut self) {
-        self.connection = None
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match self.connection.take() {
             Some(TcpConnection::Connected(x)) => {

@@ -58,10 +58,6 @@ where
         self.session.status()
     }
 
-    fn close(&mut self) {
-        self.session.close()
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         let now = SystemTime::now();
         if now >= self.next_heartbeat {
@@ -175,10 +171,6 @@ where
         self.session.status()
     }
 
-    fn close(&mut self) {
-        self.session.close()
-    }
-
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         match self.session.drive()? {
             DriveOutcome::Active => {
@@ -262,7 +254,7 @@ where
 /// The [`Default`] impl enables all liveness checks, whereas `new()` will disable all liveness checks.
 ///
 /// A builder pattern is provided to enable a combination of checks with one line of code:
-/// ```
+/// ```no_run
 /// use nbio::liveness::LivenessStrategy;
 /// let strat = LivenessStrategy::new().with_receive(true).with_publish(true);
 /// ```
