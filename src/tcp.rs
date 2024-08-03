@@ -213,8 +213,10 @@ impl Publish for TcpSession {
         data: Self::PublishPayload<'a>,
     ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
-            Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::Connecting(_)) => {
+                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
+            }
             Some(TcpConnection::MidTlsHandshake(_)) => {
                 return Err(Error::new(
                     ErrorKind::NotConnected,
@@ -276,8 +278,10 @@ impl Receive for TcpSession {
     type ReceivePayload<'a> = &'a [u8];
     fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
-            Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
+            Some(TcpConnection::Connecting(_)) => {
+                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
+            }
             Some(TcpConnection::MidTlsHandshake(_)) => {
                 return Err(Error::new(
                     ErrorKind::NotConnected,
@@ -287,21 +291,24 @@ impl Receive for TcpSession {
             None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         };
         let read = match stream.read(self.read_buffer.as_mut_slice()) {
-            Ok(x) => x,
+            Ok(x) => Some(x),
             Err(err) => match err.kind() {
-                ErrorKind::WouldBlock => 0,
+                ErrorKind::WouldBlock => None,
                 _ => {
                     self.connection = None;
                     return Err(err.into());
                 }
             },
         };
-        if read == 0 {
-            Ok(ReceiveOutcome::Idle)
-        } else {
-            Ok(ReceiveOutcome::Payload(
+        match read {
+            None => Ok(ReceiveOutcome::Idle),
+            Some(0) => {
+                // eof
+                Err(Error::new(ErrorKind::UnexpectedEof, "stream is eof"))
+            }
+            Some(read) => Ok(ReceiveOutcome::Payload(
                 &mut self.read_buffer.as_mut_slice()[..read],
-            ))
+            )),
         }
     }
 }

@@ -179,10 +179,25 @@ where
             self.read_advance = de.size;
             return Ok(ReceiveOutcome::Payload(de.frame));
         }
-        let data = match self.session.receive()? {
-            ReceiveOutcome::Payload(data) => data,
-            ReceiveOutcome::Buffered => return Ok(ReceiveOutcome::Buffered),
-            ReceiveOutcome::Idle => return Ok(ReceiveOutcome::Idle),
+        let data = match self.session.receive() {
+            Ok(ReceiveOutcome::Payload(data)) => data,
+            Ok(ReceiveOutcome::Buffered) => return Ok(ReceiveOutcome::Buffered),
+            Ok(ReceiveOutcome::Idle) => return Ok(ReceiveOutcome::Idle),
+            Err(err) => {
+                if let ErrorKind::UnexpectedEof = err.kind() {
+                    if self
+                        .deserialize_frame
+                        .check_deserialize_frame(&self.read_buffer, true)?
+                    {
+                        let de = self
+                            .deserialize_frame
+                            .deserialize_frame(&self.read_buffer)?;
+                        self.read_advance = de.size;
+                        return Ok(ReceiveOutcome::Payload(de.frame));
+                    }
+                }
+                return Err(err);
+            }
         };
         self.read_buffer.extend_from_slice(data);
         Ok(ReceiveOutcome::Buffered)
@@ -396,10 +411,25 @@ where
             self.read_advance = de.size;
             return Ok(ReceiveOutcome::Payload(de.frame));
         }
-        let data = match self.session.receive()? {
-            ReceiveOutcome::Payload(data) => data,
-            ReceiveOutcome::Buffered => return Ok(ReceiveOutcome::Buffered),
-            ReceiveOutcome::Idle => return Ok(ReceiveOutcome::Idle),
+        let data = match self.session.receive() {
+            Ok(ReceiveOutcome::Payload(data)) => data,
+            Ok(ReceiveOutcome::Buffered) => return Ok(ReceiveOutcome::Buffered),
+            Ok(ReceiveOutcome::Idle) => return Ok(ReceiveOutcome::Idle),
+            Err(err) => {
+                if let ErrorKind::UnexpectedEof = err.kind() {
+                    if self
+                        .deserialize_frame
+                        .check_deserialize_frame(&self.read_buffer, true)?
+                    {
+                        let de = self
+                            .deserialize_frame
+                            .deserialize_frame(&self.read_buffer)?;
+                        self.read_advance = de.size;
+                        return Ok(ReceiveOutcome::Payload(de.frame));
+                    }
+                }
+                return Err(err);
+            }
         };
         self.read_buffer.extend_from_slice(data);
         Ok(ReceiveOutcome::Buffered)
