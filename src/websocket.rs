@@ -66,6 +66,8 @@ impl WebSocketSession {
             request.uri().port().map(|x| x.as_u16()),
             tls_config.unwrap_or_default(),
         )?;
+        // attempt to disable nagle by default
+        stream.set_nodelay(true).ok();
         Ok(Self {
             handshake: Some(PendingHandshake::StartClientHandshake(stream, request)),
             session: None,
