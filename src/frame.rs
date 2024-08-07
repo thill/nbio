@@ -89,6 +89,10 @@ where
             read_advance: 0,
         }
     }
+
+    pub(crate) fn read_buffer_mut<'a>(&'a mut self) -> &'a mut Vec<u8> {
+        &mut self.read_buffer
+    }
 }
 impl<S, DF, SF> Session for FrameDuplex<S, DF, SF>
 where

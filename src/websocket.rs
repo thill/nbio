@@ -4,19 +4,17 @@ use std::{
     collections::VecDeque,
     fmt::Debug,
     io::{Cursor, Error, ErrorKind},
-    os::fd::FromRawFd,
 };
 
+use derived_from_tungstenite::MidClientHandshake;
 use tcp_stream::{TLSConfig, TcpStream};
 use tungstenite::{
     client::IntoClientRequest,
     error::ProtocolError,
-    handshake::MidHandshake,
     protocol::frame::{
         coding::{CloseCode, Control, Data, OpCode},
         FrameHeader,
     },
-    ClientHandshake,
 };
 
 use crate::{
@@ -123,14 +121,16 @@ impl Session for WebSocketSession {
                 Some(handshake) => {
                     let (result, handshake) = handshake.drive()?;
                     match handshake {
-                        PendingHandshake::Complete(stream, response) => {
+                        PendingHandshake::Complete(stream, mut tail, response) => {
                             self.upgrade_response = Some(response);
-                            self.session = Some(FrameDuplex::new(
+                            let mut session = FrameDuplex::new(
                                 TcpSession::new(stream)?,
                                 WebSocketFrameDeserializer::new(),
                                 WebSocketFrameSerializer::new(),
                                 self.write_buffer_capacity,
-                            ))
+                            );
+                            session.read_buffer_mut().extend_from_slice(&mut tail);
+                            self.session = Some(session);
                         }
                         handshake => self.handshake = Some(handshake),
                     };
@@ -594,35 +594,173 @@ fn parse_close_frame<'a>(payload: &[u8]) -> Result<Option<CloseFrame<'a>>, Error
 
 enum PendingHandshake {
     StartClientHandshake(TcpStream, ClientRequest),
-    MidClientHandshake(MidHandshake<ClientHandshake<TcpStream>>),
-    Complete(TcpStream, ClientResponse),
+    MidClientHandshake(MidClientHandshake),
+    Complete(TcpStream, Vec<u8>, ClientResponse),
 }
 impl PendingHandshake {
     /// drive the connection handshake
     pub fn drive(self) -> Result<(DriveOutcome, Self), Error> {
         match self {
             Self::StartClientHandshake(stream, request) => {
-                let mid = ClientHandshake::start(stream, request, None)
-                    .map_err(|err| Error::new(ErrorKind::ConnectionAborted, err))?;
+                let mid = MidClientHandshake::start(stream, request)
+                    .map_err(|err| Error::new(ErrorKind::Other, err))?;
                 Ok((DriveOutcome::Active, Self::MidClientHandshake(mid)))
             }
-            Self::MidClientHandshake(handshake) => match handshake.handshake() {
-                Ok((mut ws, response)) => {
-                    // TODO: avoid unsafe and need to swap with extra work doing more of the handshake process ourselves
-                    let mut stream = unsafe { TcpStream::from_raw_fd(0) };
-                    std::mem::swap(ws.get_mut(), &mut stream);
-                    Ok((DriveOutcome::Active, Self::Complete(stream, response)))
+            Self::MidClientHandshake(handshake) => match handshake
+                .drive()
+                .map_err(|err| Error::new(ErrorKind::Other, err))?
+            {
+                MidHandshakeOutcome::InProgress(mid, outcome) => {
+                    Ok((outcome, Self::MidClientHandshake(mid)))
                 }
-                Err(err) => match err {
-                    tungstenite::HandshakeError::Interrupted(mid) => {
-                        Ok((DriveOutcome::Idle, Self::MidClientHandshake(mid)))
+                MidHandshakeOutcome::Complete(stream, tail, response) => {
+                    Ok((DriveOutcome::Active, Self::Complete(stream, tail, response)))
+                }
+            },
+            Self::Complete(stream, tail, response) => {
+                Ok((DriveOutcome::Active, Self::Complete(stream, tail, response)))
+            }
+        }
+    }
+}
+
+enum MidHandshakeOutcome {
+    InProgress(MidClientHandshake, DriveOutcome),
+    Complete(TcpStream, Vec<u8>, tungstenite::handshake::client::Response),
+}
+
+/// derived from code in the tungstenite crate to facilitate handshakes
+mod derived_from_tungstenite {
+    use tcp_stream::TcpStream;
+    use tungstenite::{
+        error::ProtocolError,
+        handshake::{
+            client::{self, generate_request, Response},
+            derive_accept_key,
+            machine::{HandshakeMachine, RoundResult, StageResult},
+            ProcessingResult,
+        },
+        http::StatusCode,
+        Error,
+    };
+
+    use crate::DriveOutcome;
+
+    use super::MidHandshakeOutcome;
+
+    pub struct MidClientHandshake {
+        accept_key: String,
+        machine: HandshakeMachine<TcpStream>,
+    }
+    impl MidClientHandshake {
+        pub fn start(stream: TcpStream, request: client::Request) -> Result<Self, Error> {
+            if request.method() != tungstenite::http::Method::GET {
+                return Err(Error::Protocol(ProtocolError::WrongHttpMethod));
+            }
+            if request.version() < tungstenite::http::Version::HTTP_11 {
+                return Err(Error::Protocol(ProtocolError::WrongHttpVersion));
+            }
+            let _ = tungstenite::client::uri_mode(request.uri())?;
+            let (request, key) = generate_request(request)?;
+            let machine = HandshakeMachine::start_write(stream, request);
+            let accept_key = derive_accept_key(key.as_ref());
+            Ok(MidClientHandshake {
+                accept_key,
+                machine,
+            })
+        }
+
+        pub fn drive(self) -> Result<MidHandshakeOutcome, Error> {
+            let accept_key = self.accept_key;
+            match self.machine.single_round()? {
+                RoundResult::WouldBlock(machine) | RoundResult::Incomplete(machine) => {
+                    return Ok(MidHandshakeOutcome::InProgress(
+                        Self {
+                            accept_key,
+                            machine,
+                        },
+                        DriveOutcome::Idle,
+                    ))
+                }
+                RoundResult::StageFinished(s) => match Self::stage_finished(&accept_key, s)? {
+                    tungstenite::handshake::ProcessingResult::Continue(machine) => {
+                        return Ok(MidHandshakeOutcome::InProgress(
+                            Self {
+                                accept_key,
+                                machine,
+                            },
+                            DriveOutcome::Idle,
+                        ))
                     }
-                    tungstenite::HandshakeError::Failure(err) => {
-                        Err(Error::new(ErrorKind::ConnectionAborted, err))
+                    tungstenite::handshake::ProcessingResult::Done((stream, tail, response)) => {
+                        return Ok(MidHandshakeOutcome::Complete(stream, tail, response))
                     }
                 },
-            },
-            Self::Complete(s, r) => Ok((DriveOutcome::Active, Self::Complete(s, r))),
+            }
+        }
+
+        fn stage_finished(
+            accept_key: &str,
+            finish: StageResult<Response, TcpStream>,
+        ) -> Result<ProcessingResult<TcpStream, (TcpStream, Vec<u8>, Response)>, tungstenite::Error>
+        {
+            Ok(match finish {
+                StageResult::DoneWriting(stream) => {
+                    ProcessingResult::Continue(HandshakeMachine::start_read(stream))
+                }
+                StageResult::DoneReading {
+                    stream,
+                    result,
+                    tail,
+                } => {
+                    let result = match Self::verify_response(accept_key, result) {
+                        Ok(r) => r,
+                        Err(Error::Http(mut e)) => {
+                            *e.body_mut() = Some(tail);
+                            return Err(Error::Http(e));
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    ProcessingResult::Done((stream, tail, result))
+                }
+            })
+        }
+
+        fn verify_response(accept_key: &str, response: Response) -> Result<Response, Error> {
+            if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+                return Err(Error::Http(response));
+            }
+            let headers = response.headers();
+            if !headers
+                .get("Upgrade")
+                .and_then(|h| h.to_str().ok())
+                .map(|h| h.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false)
+            {
+                return Err(Error::Protocol(
+                    ProtocolError::MissingUpgradeWebSocketHeader,
+                ));
+            }
+            if !headers
+                .get("Connection")
+                .and_then(|h| h.to_str().ok())
+                .map(|h| h.eq_ignore_ascii_case("Upgrade"))
+                .unwrap_or(false)
+            {
+                return Err(Error::Protocol(
+                    ProtocolError::MissingConnectionUpgradeHeader,
+                ));
+            }
+            if !headers
+                .get("Sec-WebSocket-Accept")
+                .map(|h| h == accept_key)
+                .unwrap_or(false)
+            {
+                return Err(Error::Protocol(
+                    ProtocolError::SecWebSocketAcceptKeyMismatch,
+                ));
+            }
+            Ok(response)
         }
     }
 }

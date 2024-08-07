@@ -3,7 +3,7 @@
 use std::{
     fmt::Debug,
     io::{Error, ErrorKind, Read, Write},
-    net::{SocketAddr, TcpListener, ToSocketAddrs},
+    net::{Shutdown, SocketAddr, TcpListener, ToSocketAddrs},
     time::Duration,
 };
 
@@ -317,6 +317,18 @@ impl Debug for TcpSession {
         f.debug_struct("TcpSession")
             .field("connection", &self.connection)
             .finish()
+    }
+}
+impl Drop for TcpSession {
+    fn drop(&mut self) {
+        if let Some(mut connection) = self.connection.take() {
+            let stream = match &mut connection {
+                TcpConnection::Connecting(x) => x,
+                TcpConnection::MidTlsHandshake(x) => x.get_mut(),
+                TcpConnection::Connected(x) => x,
+            };
+            stream.shutdown(Shutdown::Both).ok();
+        }
     }
 }
 
