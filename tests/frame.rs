@@ -3,7 +3,7 @@ mod tests {
     use nbio::{
         frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer},
         tcp::{TcpServer, TcpSession},
-        Publish, PublishOutcome, Receive, ReceiveOutcome, Session,
+        Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
     };
 
     #[test]
@@ -25,6 +25,13 @@ mod tests {
             U64FrameSerializer::new(),
             1024,
         );
+
+        while client.status() == SessionStatus::Establishing
+            || session.status() == SessionStatus::Establishing
+        {
+            client.drive().unwrap();
+            session.drive().unwrap();
+        }
 
         // construct receive holder and a large payload to publish
         let mut receive_payload = None;
@@ -77,6 +84,13 @@ mod tests {
             1024,
         );
 
+        while client.status() == SessionStatus::Establishing
+            || session.status() == SessionStatus::Establishing
+        {
+            client.drive().unwrap();
+            session.drive().unwrap();
+        }
+
         // construct receive holder and payload larger than the publish buffer
         let mut receive_payload = None;
         let mut publish_payload = Vec::new();
@@ -127,6 +141,13 @@ mod tests {
             U64FrameSerializer::new(),
             1024,
         );
+
+        while client.status() == SessionStatus::Establishing
+            || session.status() == SessionStatus::Establishing
+        {
+            client.drive().unwrap();
+            session.drive().unwrap();
+        }
 
         // send 100,000 messages with client while "slowly" receiveing with session
         let mut received = Vec::new();

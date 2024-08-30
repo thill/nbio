@@ -41,6 +41,7 @@ By default, features that do not require a special build environment are enabled
 In a production codebase, you will likey want to pick and choose your required features.
 
 Feature list:
+
 - `aeron`
 - `crossbeam`
 - `http`
@@ -50,6 +51,7 @@ Feature list:
 - `websocket`
 
 Features not enabled by default:
+
 - `aeron`: requires `cmake` and `clang`.
 
 ## Examples
@@ -64,6 +66,9 @@ use nbio::tcp::TcpSession;
 
 // establish connection
 let mut client = TcpSession::connect("192.168.123.456:54321").unwrap();
+while client.status() == SessionStatus::Establishing {
+     client.drive().unwrap();
+}
 
 // publish some bytes until completion
 let mut pending_publish = "hello world!".as_bytes();
@@ -93,6 +98,9 @@ use nbio::frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer};
 // establish connection wrapped in a framing session
 let client = TcpSession::connect("192.168.123.456:54321").unwrap();
 let mut client = FrameDuplex::new(client, U64FrameDeserializer::new(), U64FrameSerializer::new(), 4096);
+while client.status() == SessionStatus::Establishing {
+     client.drive().unwrap();
+}
 
 // publish some bytes until completion
 let mut pending_publish = "hello world!".as_bytes();

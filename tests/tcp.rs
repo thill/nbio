@@ -18,6 +18,13 @@ mod tests {
         }
         let mut session = session.unwrap();
 
+        while client.status() == SessionStatus::Establishing
+            || session.status() == SessionStatus::Establishing
+        {
+            client.drive().unwrap();
+            session.drive().unwrap();
+        }
+
         // construct receive buffer and a large payload to publish
         let mut receive_buffer = Vec::new();
         let mut publish_payload = Vec::new();
@@ -47,7 +54,46 @@ mod tests {
     }
 
     #[test]
-    pub fn tcp_tls() {
+    pub fn tcp_tls_after_establishing() {
+        // tls client
+        let mut client = TcpSession::connect("www.google.com:443").unwrap();
+
+        while client.status() == SessionStatus::Establishing {
+            client.drive().unwrap();
+        }
+        assert_eq!(client.status(), SessionStatus::Established);
+
+        let mut client = client
+            .into_tls("www.google.com", TLSConfig::default())
+            .unwrap();
+        while client.status() == SessionStatus::Establishing {
+            client.drive().unwrap();
+        }
+        assert_eq!(client.status(), SessionStatus::Established);
+
+        // send request
+        let request = "GET / HTTP/1.1\r\nhost: www.google.com\r\n\r\n"
+            .as_bytes()
+            .to_vec();
+        let mut remaining = request.as_slice();
+        while let Ok(PublishOutcome::Incomplete(pw)) = client.publish(remaining) {
+            remaining = pw;
+            client.drive().unwrap();
+        }
+
+        // receive (some of) response
+        let mut response = Vec::new();
+        while response.len() < 9 {
+            if let ReceiveOutcome::Payload(receive) = client.receive().unwrap() {
+                response.extend_from_slice(receive);
+            }
+        }
+
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 "));
+    }
+
+    #[test]
+    pub fn tcp_tls_before_establishing() {
         // tls client
         let mut client = TcpSession::connect("www.google.com:443")
             .unwrap()
@@ -86,6 +132,13 @@ mod tests {
         let server = TcpServer::bind("127.0.0.1:33002").unwrap();
         let mut client = TcpSession::connect("127.0.0.1:33002").unwrap();
         let mut session = server.accept().unwrap().unwrap().0;
+
+        while client.status() == SessionStatus::Establishing
+            || session.status() == SessionStatus::Establishing
+        {
+            client.drive().unwrap();
+            session.drive().unwrap();
+        }
 
         // send 100,000 messages with client while "slowly" receiveing with session
         let mut received: Vec<u8> = Vec::new();
