@@ -453,6 +453,18 @@ impl Drop for TcpSession {
         }
     }
 }
+/// Extract the [`tcp_stream::TcpStream`] from the [`TcpSession`] if and only if it is in a connected state.
+///
+/// Note: support for this conversion may be dropped or put behind a feature flag in a future release if we
+/// move away from [`tcp_stream`] as our internal [`TcpStream`] impl.
+impl From<TcpSession> for Option<tcp_stream::TcpStream> {
+    fn from(mut value: TcpSession) -> Self {
+        match value.connection.take() {
+            Some(TcpConnection::Connected(x)) => Some(x),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(unix)]
 unsafe fn into_tcpstream(stream: mio::net::TcpStream) -> TcpStream {
