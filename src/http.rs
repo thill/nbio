@@ -10,7 +10,7 @@ use hyperium_http::{
     header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
     Response,
 };
-use tcp_stream::{OwnedTLSConfig, TLSConfig, TcpStream};
+use tcp_stream::{OwnedTLSConfig, TLSConfig};
 
 use crate::{
     buffer::GrowableCircleBuf,
@@ -162,14 +162,14 @@ impl HttpClient {
                 ))
             }
         };
-        let stream = connect_stream(
+        let session = connect_stream(
             scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
             self.tls_config.as_ref(),
         )?;
         let mut conn = HttpClientSession::new(FrameDuplex::new(
-            TcpSession::new(stream)?,
+            session,
             Http1ResponseDeserializer::new(),
             Http1RequestSerializer::new(),
             0,
@@ -190,7 +190,7 @@ pub(crate) fn connect_stream(
     host: Option<&str>,
     port: Option<u16>,
     tls_config: TLSConfig<'_, '_, '_>,
-) -> Result<TcpStream, Error> {
+) -> Result<TcpSession, Error> {
     let host = match host {
         Some(x) => x.to_owned(),
         None => return Err(io::Error::new(ErrorKind::InvalidData, "missing host")),
@@ -199,7 +199,7 @@ pub(crate) fn connect_stream(
         Some(x) => x,
         None => scheme.default_port(),
     };
-    let mut conn = TcpStream::connect(format!("{host}:{port}"))?;
+    let mut conn = TcpSession::connect(format!("{host}:{port}"))?;
     if scheme == Scheme::Https {
         conn = conn
             .into_tls(&host, tls_config)

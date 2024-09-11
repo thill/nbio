@@ -60,16 +60,14 @@ impl WebSocketSession {
                 ))
             }
         };
-        let stream = crate::http::connect_stream(
+        let session = crate::http::connect_stream(
             scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
             tls_config.unwrap_or_default(),
         )?;
-        // attempt to disable nagle by default
-        stream.set_nodelay(true).ok();
         Ok(Self {
-            handshake: Some(PendingHandshake::StartClientHandshake(stream, request)),
+            handshake: Some(PendingHandshake::ConnectStream(session, request)),
             session: None,
             write_buffer_capacity: 4096,
             upgrade_response: None,
@@ -595,6 +593,7 @@ fn parse_close_frame<'a>(payload: &[u8]) -> Result<Option<CloseFrame<'a>>, Error
 }
 
 enum PendingHandshake {
+    ConnectStream(TcpSession, ClientRequest),
     StartClientHandshake(TcpStream, ClientRequest),
     MidClientHandshake(MidClientHandshake),
     Complete(TcpStream, Vec<u8>, ClientResponse),
@@ -603,6 +602,27 @@ impl PendingHandshake {
     /// drive the connection handshake
     pub fn drive(self) -> Result<(DriveOutcome, Self), Error> {
         match self {
+            Self::ConnectStream(mut session, request) => {
+                let drive_outcome = session.drive()?;
+                match session.status() {
+                    SessionStatus::Establishing => {
+                        Ok((drive_outcome, Self::ConnectStream(session, request)))
+                    }
+                    SessionStatus::Established => Ok((
+                        DriveOutcome::Active,
+                        Self::StartClientHandshake(
+                            Option::<TcpStream>::from(session).ok_or_else(|| {
+                                Error::new(ErrorKind::Other, "TcpSession missing internal stream")
+                            })?,
+                            request,
+                        ),
+                    )),
+                    SessionStatus::Terminated => Err(Error::new(
+                        ErrorKind::ConnectionAborted,
+                        "session terminated",
+                    )),
+                }
+            }
             Self::StartClientHandshake(stream, request) => {
                 let mid = MidClientHandshake::start(stream, request)
                     .map_err(|err| Error::new(ErrorKind::Other, err))?;
