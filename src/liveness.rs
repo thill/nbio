@@ -20,23 +20,25 @@ use crate::{
 /// The session should return true if the next heartbeat is to be scheduled, or false otherwise.
 ///
 /// [`HeartbeatingSession`] will also implement [`Receive`] for underlying any underlying [`Session`] that also implements [`Receive`].
-pub struct HeartbeatingSession<S, F> {
+pub struct HeartbeatingSession<S> {
     session: S,
     interval: Duration,
-    heartbeat_writer: F,
+    heartbeat_writer: Box<dyn FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static>,
     next_heartbeat: SystemTime,
 }
-impl<S, F> HeartbeatingSession<S, F>
+impl<S> HeartbeatingSession<S>
 where
     S: Publish + 'static,
-    F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
 {
     /// Create a new `HeartbeatingSession`, using the given [`Session`], `interval`, and `heartbeat_writer`.
-    pub fn new(session: S, interval: Duration, heartbeat_writer: F) -> Self {
+    pub fn new<F>(session: S, interval: Duration, heartbeat_writer: F) -> Self
+    where
+        F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
+    {
         Self {
             session,
             interval,
-            heartbeat_writer,
+            heartbeat_writer: Box::new(heartbeat_writer),
             next_heartbeat: SystemTime::now() + interval,
         }
     }
@@ -49,10 +51,9 @@ where
         &mut self.session
     }
 }
-impl<S, F> Session for HeartbeatingSession<S, F>
+impl<S> Session for HeartbeatingSession<S>
 where
     S: Publish + 'static,
-    F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
 {
     fn status(&self) -> SessionStatus {
         self.session.status()
@@ -72,10 +73,9 @@ where
         self.session.drive()
     }
 }
-impl<S, F> Publish for HeartbeatingSession<S, F>
+impl<S> Publish for HeartbeatingSession<S>
 where
     S: Publish + 'static,
-    F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
 {
     type PublishPayload<'a> = S::PublishPayload<'a>;
 
@@ -86,10 +86,9 @@ where
         self.session.publish(payload)
     }
 }
-impl<S, F> Receive for HeartbeatingSession<S, F>
+impl<S> Receive for HeartbeatingSession<S>
 where
     S: Receive + Publish + 'static,
-    F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
 {
     type ReceivePayload<'a> = S::ReceivePayload<'a>;
     fn receive<'a>(
@@ -98,19 +97,17 @@ where
         self.session.receive()
     }
 }
-impl<S, F> Flush for HeartbeatingSession<S, F>
+impl<S> Flush for HeartbeatingSession<S>
 where
     S: Receive + Flush + 'static,
-    F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
 {
     fn flush(&mut self) -> Result<(), std::io::Error> {
         self.session.flush()
     }
 }
-impl<S, F> Debug for HeartbeatingSession<S, F>
+impl<S> Debug for HeartbeatingSession<S>
 where
     S: Publish + 'static,
-    F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HeartbeatingSession")
