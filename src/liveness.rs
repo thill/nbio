@@ -23,7 +23,7 @@ use crate::{
 pub struct HeartbeatingSession<S> {
     session: S,
     interval: Duration,
-    heartbeat_writer: Box<dyn FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static>,
+    heartbeat_writer: Box<dyn FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + Send + 'static>,
     next_heartbeat: SystemTime,
 }
 impl<S> HeartbeatingSession<S>
@@ -33,7 +33,7 @@ where
     /// Create a new `HeartbeatingSession`, using the given [`Session`], `interval`, and `heartbeat_writer`.
     pub fn new<F>(session: S, interval: Duration, heartbeat_writer: F) -> Self
     where
-        F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + 'static,
+        F: for<'a> FnMut(&mut S) -> Result<HeartbeatOutcome, Error> + Send + 'static,
     {
         Self {
             session,
