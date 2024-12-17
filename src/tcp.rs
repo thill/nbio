@@ -172,7 +172,7 @@ impl TcpSession {
     }
 
     /// Set whether we should accept invalid hostnames or not
-    pub fn accept_invalid_hostnames(mut self, accept_invalid_hostnames: bool) -> Self {
+    pub fn with_accept_invalid_hostnames(mut self, accept_invalid_hostnames: bool) -> Self {
         self.accept_invalid_hostnames = accept_invalid_hostnames;
         self
     }
