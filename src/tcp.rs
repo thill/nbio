@@ -232,9 +232,6 @@ impl TcpSession {
         domain: &str,
         config: TLSConfig<'_, '_, '_>,
     ) -> HandshakeResult {
-        let cert_chain = config
-            .cert_chain
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "cert_chain empty"))?;
         let mut builder = NativeTlsConnector::builder();
         if self.accept_invalid_hostnames {
             builder.danger_accept_invalid_hostnames(true);
@@ -247,13 +244,15 @@ impl TcpSession {
             );
         }
 
-        let mut cert_chain = std::io::BufReader::new(cert_chain.as_bytes());
-        for cert in rustls_pemfile::read_all(&mut cert_chain) {
-            if let rustls_pemfile::Item::X509Certificate(cert) = cert? {
-                builder.add_root_certificate(
-                    Certificate::from_der(&cert[..])
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-                );
+        if let Some(cert_chain) = config.cert_chain {
+            let mut cert_chain = std::io::BufReader::new(cert_chain.as_bytes());
+            for cert in rustls_pemfile::read_all(&mut cert_chain) {
+                if let rustls_pemfile::Item::X509Certificate(cert) = cert? {
+                    builder.add_root_certificate(
+                        Certificate::from_der(&cert[..])
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                    );
+                }
             }
         }
 
