@@ -7,8 +7,11 @@ use std::{
     time::Duration,
 };
 
+use native_tls::Certificate;
+
 use tcp_stream::{
-    HandshakeError, MidHandshakeTlsStream, OwnedIdentity, OwnedTLSConfig, TLSConfig, TcpStream,
+    HandshakeError, HandshakeResult, MidHandshakeTlsStream, NativeTlsConnector, OwnedIdentity,
+    OwnedTLSConfig, TLSConfig, TcpStream,
 };
 
 use crate::{
@@ -41,6 +44,7 @@ enum TcpConnection {
 pub struct TcpSession {
     read_buffer: Vec<u8>,
     connection: Option<TcpConnection>,
+    accept_invalid_hostnames: bool,
 }
 impl TcpSession {
     /// Create a TcpSession that wraps an existing [`TcpStream`]
@@ -65,6 +69,7 @@ impl TcpSession {
                 Some(TcpConnection::Connecting(stream))
             },
             read_buffer,
+            accept_invalid_hostnames: false,
         })
     }
 
@@ -113,6 +118,7 @@ impl TcpSession {
         Ok(Self {
             connection: Some(TcpConnection::Initializing(stream, poll, events, None)),
             read_buffer,
+            accept_invalid_hostnames: false,
         })
     }
 
@@ -165,6 +171,12 @@ impl TcpSession {
         Ok(self)
     }
 
+    /// Set whether we should accept invalid hostnames or not
+    pub fn with_accept_invalid_hostnames(mut self, accept_invalid_hostnames: bool) -> Self {
+        self.accept_invalid_hostnames = accept_invalid_hostnames;
+        self
+    }
+
     /// Set read_timeout on the underlying stream
     pub fn set_read_timeout(&self, read_timeout: Option<Duration>) -> Result<(), Error> {
         self.stream()?.set_read_timeout(read_timeout)
@@ -213,6 +225,44 @@ impl TcpSession {
             None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         }
     }
+
+    fn into_tls_impl(
+        &self,
+        s: TcpStream,
+        domain: &str,
+        config: TLSConfig<'_, '_, '_>,
+    ) -> HandshakeResult {
+        let cert_chain = config
+            .cert_chain
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "cert_chain empty"))?;
+        let mut builder = NativeTlsConnector::builder();
+        if self.accept_invalid_hostnames {
+            builder.danger_accept_invalid_hostnames(true);
+        }
+
+        if let Some(identity) = config.identity {
+            builder.identity(
+                native_tls::Identity::from_pkcs12(&identity.der, identity.password)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+            );
+        }
+
+        let mut cert_chain = std::io::BufReader::new(cert_chain.as_bytes());
+        for cert in rustls_pemfile::read_all(&mut cert_chain) {
+            if let rustls_pemfile::Item::X509Certificate(cert) = cert? {
+                builder.add_root_certificate(
+                    Certificate::from_der(&cert[..])
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                );
+            }
+        }
+
+        let connector = builder
+            .build()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        s.into_native_tls(&connector, domain)
+    }
 }
 impl Session for TcpSession {
     fn status(&self) -> SessionStatus {
@@ -246,7 +296,7 @@ impl Session for TcpSession {
                         match tls {
                             None => self.connection = Some(TcpConnection::Connected(stream)),
                             Some((domain, config)) => {
-                                match stream.into_tls(&domain, config.as_ref()) {
+                                match self.into_tls_impl(stream, &domain, config.as_ref()) {
                                     Ok(x) => {
                                         self.connection = Some(TcpConnection::Connected(x));
                                     }
