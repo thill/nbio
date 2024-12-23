@@ -4,6 +4,7 @@ use std::{
     fmt::Debug,
     io::{Error, ErrorKind, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, ToSocketAddrs},
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -21,6 +22,7 @@ use crate::{
 /// Internal state machine of a TCP connection
 #[derive(Debug)]
 enum TcpConnection {
+    AddressResolution(JoinHandle<Result<Vec<SocketAddr>, Error>>),
     Initializing(
         mio::net::TcpStream,
         mio::Poll,
@@ -85,14 +87,7 @@ impl TcpSession {
         Ok(self)
     }
 
-    /// Connect to the given socket address in nonblocking mode.
-    ///
-    /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
-    pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, Error> {
-        let addrs = addr
-            .to_socket_addrs()
-            .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
-            .collect::<Vec<SocketAddr>>();
+    fn addr_to_stream(addrs: Vec<SocketAddr>) -> Result<(mio::net::TcpStream, mio::Poll), Error> {
         let mut stream = None;
         let mut err = None;
         for addr in addrs {
@@ -109,9 +104,47 @@ impl TcpSession {
             },
         };
         let poll = mio::Poll::new()?;
-        let events = mio::Events::with_capacity(1);
         poll.registry()
             .register(&mut stream, mio::Token(0), mio::Interest::WRITABLE)?;
+
+        Ok((stream, poll))
+    }
+
+    /// Connect to the given socket address in nonblocking mode.
+    ///
+    /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
+    pub fn connect_nonblocking<A: ToSocketAddrs + Send + 'static>(addr: A) -> Result<Self, Error> {
+        // TODO ideally we should avoid spawning a thread here
+        let handle = thread::spawn(move || {
+            Ok(addr
+                .to_socket_addrs()
+                .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
+                .collect::<Vec<SocketAddr>>())
+        });
+
+        let mut read_buffer = Vec::new();
+        read_buffer.resize(4096, 0);
+
+        Ok(Self {
+            connection: Some(TcpConnection::AddressResolution(handle)),
+            read_buffer,
+            accept_invalid_hostnames: false,
+        })
+    }
+
+    /// Connect to the given socket address.
+    ///
+    /// Note to_socket_addrs calls https://man7.org/linux/man-pages/man3/getaddrinfo.3.html which is blocking
+    ///
+    /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
+    pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, Error> {
+        let addrs = addr
+            .to_socket_addrs()
+            .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
+            .collect::<Vec<SocketAddr>>();
+
+        let (stream, poll) = Self::addr_to_stream(addrs)?;
+        let events = mio::Events::with_capacity(1);
 
         let mut read_buffer = Vec::new();
         read_buffer.resize(4096, 0);
@@ -154,6 +187,12 @@ impl TcpSession {
             Some(TcpConnection::Connected(x)) => x,
             Some(TcpConnection::MidTlsHandshake(_)) => {
                 return Err(Error::new(ErrorKind::Other, "stream already mid-handshake"))
+            }
+            Some(TcpConnection::AddressResolution(_)) => {
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    "stream in address resolution",
+                ))
             }
             None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         };
@@ -222,6 +261,10 @@ impl TcpSession {
                 ErrorKind::NotConnected,
                 "stream is mid-handshake",
             )),
+            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream in address resolution",
+            )),
             None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         }
     }
@@ -270,12 +313,30 @@ impl Session for TcpSession {
             Some(TcpConnection::Connected(_)) => SessionStatus::Established,
             Some(TcpConnection::Connecting(_))
             | Some(TcpConnection::MidTlsHandshake(_))
-            | Some(TcpConnection::Initializing(_, _, _, _)) => SessionStatus::Establishing,
+            | Some(TcpConnection::Initializing(_, _, _, _))
+            | Some(TcpConnection::AddressResolution(_)) => SessionStatus::Establishing,
         }
     }
 
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match self.connection.take() {
+            Some(TcpConnection::AddressResolution(x)) => {
+                if x.is_finished() {
+                    let addrs = x.join().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "join failed on address resolution",
+                        )
+                    })??;
+                    let (stream, poll) = Self::addr_to_stream(addrs)?;
+
+                    let events = mio::Events::with_capacity(1);
+
+                    self.connection = Some(TcpConnection::Initializing(stream, poll, events, None));
+                }
+
+                Ok(DriveOutcome::Active)
+            }
             Some(TcpConnection::Connected(x)) => {
                 self.connection = Some(TcpConnection::Connected(x));
                 Ok(DriveOutcome::Idle)
@@ -363,24 +424,24 @@ impl Publish for TcpSession {
         data: Self::PublishPayload<'a>,
     ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
-            Some(TcpConnection::Connected(x)) => x,
-            Some(TcpConnection::Initializing(_, _, _, _)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream is initializing",
-                ))
-            }
+            Some(TcpConnection::Connected(x)) => Ok(x),
+            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is resolving addresses",
+            )),
+            Some(TcpConnection::Initializing(_, _, _, _)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is initializing",
+            )),
             Some(TcpConnection::Connecting(_)) => {
-                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
+                Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
             }
-            Some(TcpConnection::MidTlsHandshake(_)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream is mid-handshake",
-                ))
-            }
-            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
-        };
+            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is mid-handshake",
+            )),
+            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
+        }?;
         if data.is_empty() {
             // nothing to write, nothing to do
             return Ok(PublishOutcome::Published);
@@ -415,24 +476,24 @@ impl Publish for TcpSession {
 impl Flush for TcpSession {
     fn flush(&mut self) -> Result<(), Error> {
         let stream = match self.connection.as_mut() {
-            Some(TcpConnection::Connected(x)) => x,
-            Some(TcpConnection::Initializing(_, _, _, _)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream is initializing",
-                ))
-            }
+            Some(TcpConnection::Connected(x)) => Ok(x),
+            Some(TcpConnection::Initializing(_, _, _, _)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is initializing",
+            )),
             Some(TcpConnection::Connecting(_)) => {
-                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
+                Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
             }
-            Some(TcpConnection::MidTlsHandshake(_)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream is mid-handshake",
-                ))
-            }
-            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
-        };
+            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream in address resolution",
+            )),
+            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is mid-handshake",
+            )),
+            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
+        }?;
         stream.flush()
     }
 }
@@ -440,24 +501,24 @@ impl Receive for TcpSession {
     type ReceivePayload<'a> = &'a [u8];
     fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
-            Some(TcpConnection::Connected(x)) => x,
-            Some(TcpConnection::Initializing(_, _, _, _)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream is initializing",
-                ))
-            }
+            Some(TcpConnection::Connected(x)) => Ok(x),
+            Some(TcpConnection::Initializing(_, _, _, _)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is initializing",
+            )),
+            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream in address resolution",
+            )),
             Some(TcpConnection::Connecting(_)) => {
-                return Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
+                Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
             }
-            Some(TcpConnection::MidTlsHandshake(_)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream is mid-handshake",
-                ))
-            }
-            None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
-        };
+            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+                ErrorKind::NotConnected,
+                "stream is mid-handshake",
+            )),
+            None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
+        }?;
         let read = match stream.read(self.read_buffer.as_mut_slice()) {
             Ok(x) => Some(x),
             Err(err) => match err.kind() {
@@ -497,6 +558,7 @@ impl Drop for TcpSession {
                 TcpConnection::Connecting(stream) | TcpConnection::Connected(stream) => {
                     stream.shutdown(Shutdown::Both).ok()
                 }
+                TcpConnection::AddressResolution(_) => Some(()),
                 TcpConnection::MidTlsHandshake(x) => x.get_mut().shutdown(Shutdown::Both).ok(),
             };
         }
