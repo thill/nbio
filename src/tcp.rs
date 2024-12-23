@@ -114,6 +114,7 @@ impl TcpSession {
     ///
     /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
     pub fn connect_nonblocking<A: ToSocketAddrs + Send + 'static>(addr: A) -> Result<Self, Error> {
+        // TODO ideally we should avoid spawning a thread here
         let handle = thread::spawn(move || {
             Ok(addr
                 .to_socket_addrs()
