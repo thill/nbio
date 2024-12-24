@@ -13,7 +13,7 @@ pub trait NameResolverProvider {
 }
 
 /// Polls a [`NameResolutionOutcome`] to completion.
-pub trait NameResolver {
+pub trait NameResolver: Send + Sync {
     fn poll(&mut self) -> Result<NameResolutionOutcome, Error>;
 }
 /// [`NameResolver`] outcome that can be polled to completion.
