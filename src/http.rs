@@ -124,7 +124,7 @@ impl HttpClient {
         port: u16,
         scheme: Scheme,
     ) -> Result<HttpClientSession, io::Error> {
-        let mut conn = TcpSession::connect(format!("{host}:{port}"))?;
+        let mut conn = TcpSession::connect_nonblocking(format!("{host}:{port}",))?;
         if scheme == Scheme::Https {
             conn = conn.into_tls(&host, self.tls_config.as_ref())?;
         }
@@ -199,7 +199,7 @@ pub(crate) fn connect_stream(
         Some(x) => x,
         None => scheme.default_port(),
     };
-    let mut conn = TcpSession::connect(format!("{host}:{port}"))?;
+    let mut conn = TcpSession::connect_nonblocking(format!("{host}:{port}"))?;
     if scheme == Scheme::Https {
         conn = conn
             .into_tls(&host, tls_config)

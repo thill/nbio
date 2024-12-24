@@ -22,7 +22,10 @@ use crate::{
 /// Internal state machine of a TCP connection
 #[derive(Debug)]
 enum TcpConnection {
-    AddressResolution(JoinHandle<Result<Vec<SocketAddr>, Error>>),
+    AddressResolution(
+        JoinHandle<Result<Vec<SocketAddr>, Error>>,
+        Option<(String, OwnedTLSConfig)>,
+    ),
     Initializing(
         mio::net::TcpStream,
         mio::Poll,
@@ -126,7 +129,7 @@ impl TcpSession {
         read_buffer.resize(4096, 0);
 
         Ok(Self {
-            connection: Some(TcpConnection::AddressResolution(handle)),
+            connection: Some(TcpConnection::AddressResolution(handle, None)),
             read_buffer,
             accept_invalid_hostnames: false,
         })
@@ -188,11 +191,25 @@ impl TcpSession {
             Some(TcpConnection::MidTlsHandshake(_)) => {
                 return Err(Error::new(ErrorKind::Other, "stream already mid-handshake"))
             }
-            Some(TcpConnection::AddressResolution(_)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream in address resolution",
-                ))
+            Some(TcpConnection::AddressResolution(x, tls)) => {
+                if tls.is_some() {
+                    return Err(Error::new(
+                        ErrorKind::NotConnected,
+                        "tls config already set",
+                    ));
+                }
+                let config = OwnedTLSConfig {
+                    identity: config.identity.map(|x| OwnedIdentity {
+                        der: x.der.to_vec(),
+                        password: x.password.to_owned(),
+                    }),
+                    cert_chain: config.cert_chain.map(|x| x.to_owned()),
+                };
+                self.connection = Some(TcpConnection::AddressResolution(
+                    x,
+                    Some((domain.to_owned(), config)),
+                ));
+                return Ok(self);
             }
             None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         };
@@ -261,7 +278,7 @@ impl TcpSession {
                 ErrorKind::NotConnected,
                 "stream is mid-handshake",
             )),
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream in address resolution",
             )),
@@ -314,13 +331,13 @@ impl Session for TcpSession {
             Some(TcpConnection::Connecting(_))
             | Some(TcpConnection::MidTlsHandshake(_))
             | Some(TcpConnection::Initializing(_, _, _, _))
-            | Some(TcpConnection::AddressResolution(_)) => SessionStatus::Establishing,
+            | Some(TcpConnection::AddressResolution(_, _)) => SessionStatus::Establishing,
         }
     }
 
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match self.connection.take() {
-            Some(TcpConnection::AddressResolution(x)) => {
+            Some(TcpConnection::AddressResolution(x, tls)) => {
                 if x.is_finished() {
                     let addrs = x.join().map_err(|_| {
                         std::io::Error::new(
@@ -332,7 +349,9 @@ impl Session for TcpSession {
 
                     let events = mio::Events::with_capacity(1);
 
-                    self.connection = Some(TcpConnection::Initializing(stream, poll, events, None));
+                    self.connection = Some(TcpConnection::Initializing(stream, poll, events, tls));
+                } else {
+                    self.connection = Some(TcpConnection::AddressResolution(x, tls))
                 }
 
                 Ok(DriveOutcome::Active)
@@ -425,7 +444,7 @@ impl Publish for TcpSession {
     ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connected(x)) => Ok(x),
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream is resolving addresses",
             )),
@@ -484,7 +503,7 @@ impl Flush for TcpSession {
             Some(TcpConnection::Connecting(_)) => {
                 Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
             }
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream in address resolution",
             )),
@@ -506,7 +525,7 @@ impl Receive for TcpSession {
                 ErrorKind::NotConnected,
                 "stream is initializing",
             )),
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream in address resolution",
             )),
@@ -558,7 +577,7 @@ impl Drop for TcpSession {
                 TcpConnection::Connecting(stream) | TcpConnection::Connected(stream) => {
                     stream.shutdown(Shutdown::Both).ok()
                 }
-                TcpConnection::AddressResolution(_) => Some(()),
+                TcpConnection::AddressResolution(_, _) => Some(()),
                 TcpConnection::MidTlsHandshake(x) => x.get_mut().shutdown(Shutdown::Both).ok(),
             };
         }

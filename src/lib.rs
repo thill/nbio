@@ -61,7 +61,7 @@
 //! use nbio::tcp::TcpSession;
 //!
 //! // establish connection
-//! let mut client = TcpSession::connect("192.168.123.456:54321").unwrap();
+//! let mut client = TcpSession::connect_nonblocking("192.168.123.456:54321").unwrap();
 //!
 //! // publish some bytes until completion
 //! let mut pending_publish = "hello world!".as_bytes();
@@ -89,7 +89,7 @@
 //! use nbio::frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer};
 //!
 //! // establish connection wrapped in a framing session
-//! let client = TcpSession::connect("192.168.123.456:54321").unwrap();
+//! let client = TcpSession::connect_nonblocking("192.168.123.456:54321").unwrap();
 //! let mut client = FrameDuplex::new(client, U64FrameDeserializer::new(), U64FrameSerializer::new(), 4096);
 //!
 //! // publish some bytes until completion
