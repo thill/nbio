@@ -12,7 +12,8 @@ mod tests {
         let timeout = SystemTime::now() + Duration::from_secs(5);
 
         // connect
-        let mut session = WebSocketSession::connect("wss://echo.websocket.org/", None).unwrap();
+        let mut session =
+            WebSocketSession::connect("wss://echo.websocket.org/", None, None).unwrap();
         while session.status() == SessionStatus::Establishing && SystemTime::now() < timeout {
             session.drive().unwrap();
         }

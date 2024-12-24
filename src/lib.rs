@@ -61,7 +61,7 @@
 //! use nbio::tcp::TcpSession;
 //!
 //! // establish connection
-//! let mut client = TcpSession::connect("192.168.123.456:54321").unwrap();
+//! let mut client = TcpSession::connect("192.168.123.456:54321", None).unwrap();
 //!
 //! // publish some bytes until completion
 //! let mut pending_publish = "hello world!".as_bytes();
@@ -89,7 +89,7 @@
 //! use nbio::frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer};
 //!
 //! // establish connection wrapped in a framing session
-//! let client = TcpSession::connect("192.168.123.456:54321").unwrap();
+//! let client = TcpSession::connect("192.168.123.456:54321", None).unwrap();
 //! let mut client = FrameDuplex::new(client, U64FrameDeserializer::new(), U64FrameSerializer::new(), 4096);
 //!
 //! // publish some bytes until completion
@@ -123,7 +123,7 @@
 //! // create the client and make the request
 //! let mut client = HttpClient::new();
 //! let mut conn = client
-//!     .request(Request::get("http://icanhazip.com").body(()).unwrap())
+//!     .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
 //!     .unwrap();
 //!
 //! // drive and read the conn until a full response is received
@@ -148,7 +148,7 @@
 //! use nbio::websocket::{Message, WebSocketSession};
 //!
 //! // connect and drive the handshake
-//! let mut session = WebSocketSession::connect("wss://echo.websocket.org/", None).unwrap();
+//! let mut session = WebSocketSession::connect("wss://echo.websocket.org/", None, None).unwrap();
 //! while session.status() == SessionStatus::Establishing {
 //!      session.drive().unwrap();
 //! }
@@ -185,6 +185,7 @@ pub mod buffer;
 pub mod compat;
 #[cfg(any(feature = "crossbeam"))]
 pub mod crossbeam;
+pub mod dns;
 pub mod frame;
 #[cfg(any(feature = "http"))]
 pub mod http;

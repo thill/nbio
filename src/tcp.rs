@@ -2,15 +2,11 @@
 
 use std::{
     fmt::Debug,
-    future::Future,
     io::{Error, ErrorKind, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, ToSocketAddrs},
-    pin::Pin,
-    task::{Context, Poll, Waker},
     time::Duration,
 };
 
-use futures::{task::noop_waker, FutureExt};
 use native_tls::Certificate;
 
 use tcp_stream::{
@@ -19,15 +15,13 @@ use tcp_stream::{
 };
 
 use crate::{
+    dns::{NameResolutionOutcome, NameResolver, NameResolverProvider, STD_NAME_RESOLVER_PROVIDER},
     DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
 /// Internal state machine of a TCP connection
 enum TcpConnection {
-    AddressResolution(
-        FuturePoller<Result<Vec<SocketAddr>, Error>>,
-        Option<(String, OwnedTLSConfig)>,
-    ),
+    AddressResolution(Box<dyn NameResolver>, Option<(String, OwnedTLSConfig)>),
     Initializing(
         mio::net::TcpStream,
         mio::Poll,
@@ -130,12 +124,17 @@ impl TcpSession {
     /// Connect to the given socket address.
     ///
     /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
-    pub fn connect<A: ToSocketAddrs + 'static>(addr: A) -> Result<Self, Error> {
+    /// If `name_resolver_provider` is None, [`crate::dns::StdNameResolverProvider`] will be used.
+    pub fn connect<S: Into<String>>(
+        addr: S,
+        name_resolver_provider: Option<&dyn NameResolverProvider>,
+    ) -> Result<Self, Error> {
+        let name_resolver_provider = name_resolver_provider.unwrap_or(&STD_NAME_RESOLVER_PROVIDER);
         let mut read_buffer = Vec::new();
         read_buffer.resize(4096, 0);
         Ok(Self {
             connection: Some(TcpConnection::AddressResolution(
-                FuturePoller::new(Box::pin(resolve(addr))),
+                name_resolver_provider.start(addr.into()),
                 None,
             )),
             read_buffer,
@@ -316,17 +315,20 @@ impl Session for TcpSession {
 
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match self.connection.take() {
-            Some(TcpConnection::AddressResolution(mut x, tls)) => match x.poll() {
-                Poll::Ready(Ok(addrs)) => {
+            Some(TcpConnection::AddressResolution(mut x, tls)) => match x.poll()? {
+                NameResolutionOutcome::Idle => {
+                    self.connection = Some(TcpConnection::AddressResolution(x, tls));
+                    Ok(DriveOutcome::Idle)
+                }
+                NameResolutionOutcome::Active => {
+                    self.connection = Some(TcpConnection::AddressResolution(x, tls));
+                    Ok(DriveOutcome::Active)
+                }
+                NameResolutionOutcome::Resolved(addrs) => {
                     let (stream, poll) = Self::addr_to_stream(addrs)?;
                     let events = mio::Events::with_capacity(1);
                     self.connection = Some(TcpConnection::Initializing(stream, poll, events, tls));
                     Ok(DriveOutcome::Active)
-                }
-                Poll::Ready(Err(err)) => Err(Error::new(ErrorKind::Other, err)),
-                Poll::Pending => {
-                    self.connection = Some(TcpConnection::AddressResolution(x, tls));
-                    Ok(DriveOutcome::Idle)
                 }
             },
 
@@ -635,29 +637,4 @@ impl TcpServer {
             addr,
         )))
     }
-}
-
-struct FuturePoller<T> {
-    waker: Waker,
-    future: Pin<Box<dyn Future<Output = T>>>,
-}
-impl<T> FuturePoller<T> {
-    fn new(future: Pin<Box<dyn Future<Output = T>>>) -> Self {
-        Self {
-            waker: noop_waker(),
-            future,
-        }
-    }
-    fn poll(&mut self) -> Poll<T> {
-        self.future
-            .poll_unpin(&mut Context::from_waker(&self.waker))
-    }
-}
-
-async fn resolve<A: ToSocketAddrs>(addr: A) -> Result<Vec<SocketAddr>, Error> {
-    // TODO this is a placeholder to get something that is actually async and will not block
-    Ok(addr
-        .to_socket_addrs()
-        .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
-        .collect::<Vec<SocketAddr>>())
 }

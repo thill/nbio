@@ -3,6 +3,7 @@ mod tests {
     use tcp_stream::TLSConfig;
 
     use nbio::{
+        dns::StdNameResolverProvider,
         tcp::{TcpServer, TcpSession},
         Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
     };
@@ -11,7 +12,7 @@ mod tests {
     pub fn tcp_client_server() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:33001").unwrap();
-        let mut client = TcpSession::connect("127.0.0.1:33001").unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:33001", None).unwrap();
         let mut session = None;
         while let None = session {
             client.drive().unwrap();
@@ -57,7 +58,7 @@ mod tests {
     #[test]
     pub fn tcp_tls_after_establishing() {
         // tls client
-        let mut client = TcpSession::connect("www.google.com:443").unwrap();
+        let mut client = TcpSession::connect("www.google.com:443", None).unwrap();
 
         while client.status() == SessionStatus::Establishing {
             client.drive().unwrap();
@@ -96,7 +97,7 @@ mod tests {
     #[test]
     pub fn tcp_tls_before_establishing() {
         // tls client
-        let mut client = TcpSession::connect("www.google.com:443")
+        let mut client = TcpSession::connect("www.google.com:443", None)
             .unwrap()
             .into_tls("www.google.com", TLSConfig::default())
             .unwrap();
@@ -131,7 +132,8 @@ mod tests {
     pub fn tcp_slow_consumer() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:33002").unwrap();
-        let mut client = TcpSession::connect("127.0.0.1:33002").unwrap();
+        let mut client =
+            TcpSession::connect("127.0.0.1:33002", Some(&StdNameResolverProvider)).unwrap();
         client.drive().unwrap();
         let mut session = server.accept().unwrap().unwrap().0;
 

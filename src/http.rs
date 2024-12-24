@@ -14,6 +14,7 @@ use tcp_stream::{OwnedTLSConfig, TLSConfig};
 
 use crate::{
     buffer::GrowableCircleBuf,
+    dns::NameResolverProvider,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
     DriveOutcome, Flush, Publish, PublishOutcome, Receive, Session, SessionStatus,
@@ -78,7 +79,7 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 /// // create the client and make the request
 /// let mut client = HttpClient::new();
 /// let mut conn = client
-///     .request(Request::get("http://icanhazip.com").body(()).unwrap())
+///     .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
 ///     .unwrap();
 ///
 /// // drive and read the conn until a full response is received
@@ -123,8 +124,9 @@ impl HttpClient {
         host: &str,
         port: u16,
         scheme: Scheme,
+        name_resolver_provider: Option<&dyn NameResolverProvider>,
     ) -> Result<HttpClientSession, io::Error> {
-        let mut conn = TcpSession::connect(format!("{host}:{port}"))?;
+        let mut conn = TcpSession::connect(format!("{host}:{port}"), name_resolver_provider)?;
         if scheme == Scheme::Https {
             conn = conn.into_tls(&host, self.tls_config.as_ref())?;
         }
@@ -148,6 +150,7 @@ impl HttpClient {
     pub fn request<I: IntoBody>(
         &mut self,
         request: hyperium_http::Request<I>,
+        name_resolver_provider: Option<&dyn NameResolverProvider>,
     ) -> Result<HttpClientSession, io::Error> {
         let (parts, body) = request.into_parts();
         let request = hyperium_http::Request::from_parts(parts, body.into_body());
@@ -167,6 +170,7 @@ impl HttpClient {
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
             self.tls_config.as_ref(),
+            name_resolver_provider,
         )?;
         let mut conn = HttpClientSession::new(FrameDuplex::new(
             session,
@@ -190,6 +194,7 @@ pub(crate) fn connect_stream(
     host: Option<&str>,
     port: Option<u16>,
     tls_config: TLSConfig<'_, '_, '_>,
+    name_resolver_provider: Option<&dyn NameResolverProvider>,
 ) -> Result<TcpSession, Error> {
     let host = match host {
         Some(x) => x.to_owned(),
@@ -199,7 +204,7 @@ pub(crate) fn connect_stream(
         Some(x) => x,
         None => scheme.default_port(),
     };
-    let mut conn = TcpSession::connect(format!("{host}:{port}"))?;
+    let mut conn = TcpSession::connect(format!("{host}:{port}"), name_resolver_provider)?;
     if scheme == Scheme::Https {
         conn = conn
             .into_tls(&host, tls_config)

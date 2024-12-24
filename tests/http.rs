@@ -4,14 +4,19 @@ mod tests {
 
     use http::{Request, StatusCode};
 
-    use nbio::{http::HttpClient, Publish, Receive, ReceiveOutcome, Session};
+    use nbio::{
+        dns::StdNameResolverProvider, http::HttpClient, Publish, Receive, ReceiveOutcome, Session,
+    };
 
     #[test]
     fn test_google_chunked_response() {
         // create the client and make the request
         let mut client = HttpClient::new();
         let mut conn = client
-            .request(Request::get("https://www.google.com").body(()).unwrap())
+            .request(
+                Request::get("https://www.google.com").body(()).unwrap(),
+                Some(&StdNameResolverProvider),
+            )
             .unwrap();
 
         // receive the conn until a full response is received
@@ -31,7 +36,7 @@ mod tests {
         // create the client and make the request
         let mut client = HttpClient::new();
         let mut conn = client
-            .request(Request::get("http://icanhazip.com").body(()).unwrap())
+            .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
             .unwrap();
 
         // receive the conn until a full response is received
@@ -52,7 +57,10 @@ mod tests {
         // create the client and make the initial request
         let mut client = HttpClient::new();
         let mut conn = client
-            .request(Request::get("http://icanhazip.com").body(()).unwrap())
+            .request(
+                Request::get("http://icanhazip.com").body(()).unwrap(),
+                Some(&StdNameResolverProvider),
+            )
             .unwrap();
 
         // receive the conn until the first full response is received

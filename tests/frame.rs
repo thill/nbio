@@ -1,6 +1,7 @@
 #[cfg(any(feature = "tcp"))]
 mod tests {
     use nbio::{
+        dns::StdNameResolverProvider,
         frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer},
         tcp::{TcpServer, TcpSession},
         Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
@@ -10,7 +11,8 @@ mod tests {
     fn one_small_frame() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34001").unwrap();
-        let mut client = TcpSession::connect("127.0.0.1:34001").unwrap();
+        let mut client =
+            TcpSession::connect("127.0.0.1:34001", Some(&StdNameResolverProvider)).unwrap();
         client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 
@@ -69,7 +71,7 @@ mod tests {
     fn one_large_frame() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34002").unwrap();
-        let mut client = TcpSession::connect("127.0.0.1:34002").unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:34002", None).unwrap();
         client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 
@@ -127,7 +129,7 @@ mod tests {
     fn framing_slow_consumer() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34003").unwrap();
-        let mut client = TcpSession::connect("127.0.0.1:34003").unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:34003", None).unwrap();
         client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 

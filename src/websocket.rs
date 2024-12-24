@@ -18,6 +18,7 @@ use tungstenite::{
 };
 
 use crate::{
+    dns::NameResolverProvider,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     http::Scheme,
     tcp::TcpSession,
@@ -45,6 +46,7 @@ impl WebSocketSession {
     pub fn connect<I: IntoClientRequest>(
         request: I,
         tls_config: Option<TLSConfig<'_, '_, '_>>,
+        name_resolver_provider: Option<&dyn NameResolverProvider>,
     ) -> Result<Self, Error> {
         let request = request
             .into_client_request()
@@ -65,6 +67,7 @@ impl WebSocketSession {
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
             tls_config.unwrap_or_default(),
+            name_resolver_provider,
         )?;
         Ok(Self {
             handshake: Some(PendingHandshake::ConnectStream(session, request)),
