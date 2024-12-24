@@ -177,6 +177,11 @@ mod tests {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:33008").unwrap();
         let mut client = TcpSession::connect_nonblocking("127.0.0.1:33008").unwrap();
+
+        while client.status() == SessionStatus::Establishing {
+            client.drive().unwrap();
+        }
+
         let mut session = None;
         while let None = session {
             session = server.accept().unwrap().map(|(s, _)| s);
