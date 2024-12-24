@@ -2,12 +2,15 @@
 
 use std::{
     fmt::Debug,
+    future::Future,
     io::{Error, ErrorKind, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, ToSocketAddrs},
-    thread::{self, JoinHandle},
+    pin::Pin,
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
+use futures::{task::noop_waker, FutureExt};
 use native_tls::Certificate;
 
 use tcp_stream::{
@@ -20,9 +23,11 @@ use crate::{
 };
 
 /// Internal state machine of a TCP connection
-#[derive(Debug)]
 enum TcpConnection {
-    AddressResolution(JoinHandle<Result<Vec<SocketAddr>, Error>>),
+    AddressResolution(
+        FuturePoller<Result<Vec<SocketAddr>, Error>>,
+        Option<(String, OwnedTLSConfig)>,
+    ),
     Initializing(
         mio::net::TcpStream,
         mio::Poll,
@@ -32,6 +37,18 @@ enum TcpConnection {
     Connecting(TcpStream),
     MidTlsHandshake(MidHandshakeTlsStream),
     Connected(TcpStream),
+}
+impl Debug for TcpConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::AddressResolution(_, _) => "AddressResolution",
+            Self::Initializing(_, _, _, _) => "Initializing",
+            Self::Connecting(_) => "Connecting",
+            Self::MidTlsHandshake(_) => "MidTlsHandshake",
+            Self::Connected(_) => "Connected",
+        };
+        f.write_str(s)
+    }
 }
 
 /// A [`Session`] that can [`Publish`] and [`Receive`] that encapsulates a [`TcpStream`].
@@ -110,46 +127,17 @@ impl TcpSession {
         Ok((stream, poll))
     }
 
-    /// Connect to the given socket address in nonblocking mode.
-    ///
-    /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
-    pub fn connect_nonblocking<A: ToSocketAddrs + Send + 'static>(addr: A) -> Result<Self, Error> {
-        // TODO ideally we should avoid spawning a thread here
-        let handle = thread::spawn(move || {
-            Ok(addr
-                .to_socket_addrs()
-                .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
-                .collect::<Vec<SocketAddr>>())
-        });
-
-        let mut read_buffer = Vec::new();
-        read_buffer.resize(4096, 0);
-
-        Ok(Self {
-            connection: Some(TcpConnection::AddressResolution(handle)),
-            read_buffer,
-            accept_invalid_hostnames: false,
-        })
-    }
-
     /// Connect to the given socket address.
     ///
-    /// Note to_socket_addrs calls https://man7.org/linux/man-pages/man3/getaddrinfo.3.html which is blocking
-    ///
     /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
-    pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, Error> {
-        let addrs = addr
-            .to_socket_addrs()
-            .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
-            .collect::<Vec<SocketAddr>>();
-
-        let (stream, poll) = Self::addr_to_stream(addrs)?;
-        let events = mio::Events::with_capacity(1);
-
+    pub fn connect<A: ToSocketAddrs + 'static>(addr: A) -> Result<Self, Error> {
         let mut read_buffer = Vec::new();
         read_buffer.resize(4096, 0);
         Ok(Self {
-            connection: Some(TcpConnection::Initializing(stream, poll, events, None)),
+            connection: Some(TcpConnection::AddressResolution(
+                FuturePoller::new(Box::pin(resolve(addr))),
+                None,
+            )),
             read_buffer,
             accept_invalid_hostnames: false,
         })
@@ -188,11 +176,19 @@ impl TcpSession {
             Some(TcpConnection::MidTlsHandshake(_)) => {
                 return Err(Error::new(ErrorKind::Other, "stream already mid-handshake"))
             }
-            Some(TcpConnection::AddressResolution(_)) => {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    "stream in address resolution",
-                ))
+            Some(TcpConnection::AddressResolution(x, _)) => {
+                let config = OwnedTLSConfig {
+                    identity: config.identity.map(|x| OwnedIdentity {
+                        der: x.der.to_vec(),
+                        password: x.password.to_owned(),
+                    }),
+                    cert_chain: config.cert_chain.map(|x| x.to_owned()),
+                };
+                self.connection = Some(TcpConnection::AddressResolution(
+                    x,
+                    Some((domain.to_owned(), config)),
+                ));
+                return Ok(self);
             }
             None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         };
@@ -261,7 +257,7 @@ impl TcpSession {
                 ErrorKind::NotConnected,
                 "stream is mid-handshake",
             )),
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream in address resolution",
             )),
@@ -314,29 +310,26 @@ impl Session for TcpSession {
             Some(TcpConnection::Connecting(_))
             | Some(TcpConnection::MidTlsHandshake(_))
             | Some(TcpConnection::Initializing(_, _, _, _))
-            | Some(TcpConnection::AddressResolution(_)) => SessionStatus::Establishing,
+            | Some(TcpConnection::AddressResolution(_, _)) => SessionStatus::Establishing,
         }
     }
 
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match self.connection.take() {
-            Some(TcpConnection::AddressResolution(x)) => {
-                if x.is_finished() {
-                    let addrs = x.join().map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "join failed on address resolution",
-                        )
-                    })??;
+            Some(TcpConnection::AddressResolution(mut x, tls)) => match x.poll() {
+                Poll::Ready(Ok(addrs)) => {
                     let (stream, poll) = Self::addr_to_stream(addrs)?;
-
                     let events = mio::Events::with_capacity(1);
-
-                    self.connection = Some(TcpConnection::Initializing(stream, poll, events, None));
+                    self.connection = Some(TcpConnection::Initializing(stream, poll, events, tls));
+                    Ok(DriveOutcome::Active)
                 }
+                Poll::Ready(Err(err)) => Err(Error::new(ErrorKind::Other, err)),
+                Poll::Pending => {
+                    self.connection = Some(TcpConnection::AddressResolution(x, tls));
+                    Ok(DriveOutcome::Idle)
+                }
+            },
 
-                Ok(DriveOutcome::Active)
-            }
             Some(TcpConnection::Connected(x)) => {
                 self.connection = Some(TcpConnection::Connected(x));
                 Ok(DriveOutcome::Idle)
@@ -425,7 +418,7 @@ impl Publish for TcpSession {
     ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connected(x)) => Ok(x),
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream is resolving addresses",
             )),
@@ -484,7 +477,7 @@ impl Flush for TcpSession {
             Some(TcpConnection::Connecting(_)) => {
                 Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
             }
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream in address resolution",
             )),
@@ -506,7 +499,7 @@ impl Receive for TcpSession {
                 ErrorKind::NotConnected,
                 "stream is initializing",
             )),
-            Some(TcpConnection::AddressResolution(_)) => Err(Error::new(
+            Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream in address resolution",
             )),
@@ -558,7 +551,7 @@ impl Drop for TcpSession {
                 TcpConnection::Connecting(stream) | TcpConnection::Connected(stream) => {
                     stream.shutdown(Shutdown::Both).ok()
                 }
-                TcpConnection::AddressResolution(_) => Some(()),
+                TcpConnection::AddressResolution(_, _) => Some(()),
                 TcpConnection::MidTlsHandshake(x) => x.get_mut().shutdown(Shutdown::Both).ok(),
             };
         }
@@ -642,4 +635,29 @@ impl TcpServer {
             addr,
         )))
     }
+}
+
+struct FuturePoller<T> {
+    waker: Waker,
+    future: Pin<Box<dyn Future<Output = T>>>,
+}
+impl<T> FuturePoller<T> {
+    fn new(future: Pin<Box<dyn Future<Output = T>>>) -> Self {
+        Self {
+            waker: noop_waker(),
+            future,
+        }
+    }
+    fn poll(&mut self) -> Poll<T> {
+        self.future
+            .poll_unpin(&mut Context::from_waker(&self.waker))
+    }
+}
+
+async fn resolve<A: ToSocketAddrs>(addr: A) -> Result<Vec<SocketAddr>, Error> {
+    // TODO this is a placeholder to get something that is actually async and will not block
+    Ok(addr
+        .to_socket_addrs()
+        .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
+        .collect::<Vec<SocketAddr>>())
 }

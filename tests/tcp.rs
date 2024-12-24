@@ -14,6 +14,7 @@ mod tests {
         let mut client = TcpSession::connect("127.0.0.1:33001").unwrap();
         let mut session = None;
         while let None = session {
+            client.drive().unwrap();
             session = server.accept().unwrap().map(|(s, _)| s);
         }
         let mut session = session.unwrap();
@@ -131,6 +132,7 @@ mod tests {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:33002").unwrap();
         let mut client = TcpSession::connect("127.0.0.1:33002").unwrap();
+        client.drive().unwrap();
         let mut session = server.accept().unwrap().unwrap().0;
 
         while client.status() == SessionStatus::Establishing

@@ -10,7 +10,8 @@ mod tests {
     fn one_small_frame() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34001").unwrap();
-        let client = TcpSession::connect("127.0.0.1:34001").unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:34001").unwrap();
+        client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 
         let mut client = FrameDuplex::new(
@@ -68,7 +69,8 @@ mod tests {
     fn one_large_frame() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34002").unwrap();
-        let client = TcpSession::connect("127.0.0.1:34002").unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:34002").unwrap();
+        client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 
         let mut client = FrameDuplex::new(
@@ -125,7 +127,8 @@ mod tests {
     fn framing_slow_consumer() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34003").unwrap();
-        let client = TcpSession::connect("127.0.0.1:34003").unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:34003").unwrap();
+        client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 
         // use a small publish buffer to stress test
