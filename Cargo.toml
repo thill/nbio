@@ -21,7 +21,7 @@ tcp = ["libc", "mio", "dep:tcp-stream"]
 websocket = ["http", "rand", "tcp", "dep:tungstenite"]
 
 [dependencies]
-async-dns = "0.1.1"
+async-std = "1.13.0"
 chunked_transfer = { version = "1.4.1", optional = true }
 circbuf = "0.2.1"
 crossbeam-channel = { version = "0.5.13", optional = true }

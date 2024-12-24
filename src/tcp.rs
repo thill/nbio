@@ -130,7 +130,12 @@ impl TcpSession {
     /// Connect to the given socket address.
     ///
     /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
-    pub fn connect<A: ToSocketAddrs + 'static>(addr: A) -> Result<Self, Error> {
+    pub fn connect<A: async_std::net::ToSocketAddrs + Send + Sync + 'static>(
+        addr: A,
+    ) -> Result<Self, Error>
+    where
+        <A as async_std::net::ToSocketAddrs>::Iter: Sync + Send,
+    {
         let mut read_buffer = Vec::new();
         read_buffer.resize(4096, 0);
         Ok(Self {
@@ -639,10 +644,10 @@ impl TcpServer {
 
 struct FuturePoller<T> {
     waker: Waker,
-    future: Pin<Box<dyn Future<Output = T>>>,
+    future: Pin<Box<dyn Future<Output = T> + Send + Sync>>,
 }
 impl<T> FuturePoller<T> {
-    fn new(future: Pin<Box<dyn Future<Output = T>>>) -> Self {
+    fn new(future: Pin<Box<dyn Future<Output = T> + Send + Sync>>) -> Self {
         Self {
             waker: noop_waker(),
             future,
@@ -654,10 +659,12 @@ impl<T> FuturePoller<T> {
     }
 }
 
-async fn resolve<A: ToSocketAddrs>(addr: A) -> Result<Vec<SocketAddr>, Error> {
-    // TODO this is a placeholder to get something that is actually async and will not block
+async fn resolve<A: async_std::net::ToSocketAddrs + Send + Sync>(
+    addr: A,
+) -> Result<Vec<SocketAddr>, Error> {
     Ok(addr
         .to_socket_addrs()
+        .await
         .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
         .collect::<Vec<SocketAddr>>())
 }
