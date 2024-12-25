@@ -13,7 +13,7 @@ pub trait AddrResolverProvider {
 }
 
 /// Polls a [`AddrResolutionOutcome`] to completion.
-pub trait AddrResolver: Send {
+pub trait AddrResolver: Send + Sync {
     fn poll(&mut self) -> Result<AddrResolutionOutcome, Error>;
 }
 
