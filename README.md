@@ -31,7 +31,7 @@ providing the ability for implementations to reference internal buffers or queue
 The philosophy of this crate is that an [`Err`] should always represent a transport or protocol-level error.
 An [`Err`] should not be returned by a function as a condition that should be handled during **normal** branching logic.
 As a result, instead of forcing you to handle [`std::io::ErrorKind::WouldBlock`] everywhere you deal with nonblocking code,
-this crate will indicate partial receive/publish operations using [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Buffered`],
+this crate will indicate partial receive/publish operations using [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Active`],
 and [`PublishOutcome::Incomplete`] as [`Result::Ok`].
 
 ## Features

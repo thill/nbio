@@ -29,7 +29,7 @@
 //! The philosophy of this crate is that an [`Err`] should always represent a transport or protocol-level error.
 //! An [`Err`] should not be returned by a function as a condition that should be handled during **normal** branching logic.
 //! As a result, instead of forcing you to handle [`std::io::ErrorKind::WouldBlock`] everywhere you deal with nonblocking code,
-//! this crate will indicate partial receive/publish operations using [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Buffered`],
+//! this crate will indicate partial receive/publish operations using [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Active`],
 //! and [`PublishOutcome::Incomplete`] as [`Result::Ok`].
 //!
 //! # Features
@@ -67,7 +67,6 @@
 //! let mut pending_publish = "hello world!".as_bytes();
 //! while let PublishOutcome::Incomplete(pending) = client.publish(pending_publish).unwrap() {
 //!     pending_publish = pending;
-//!     client.drive().unwrap();
 //! }
 //!
 //! // print received bytes
@@ -96,7 +95,6 @@
 //! let mut pending_publish = "hello world!".as_bytes();
 //! while let PublishOutcome::Incomplete(pending) = client.publish(pending_publish).unwrap() {
 //!     pending_publish = pending;
-//!     client.drive().unwrap();
 //! }
 //!
 //! // print received bytes
@@ -126,9 +124,8 @@
 //!     .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
 //!     .unwrap();
 //!
-//! // drive and read the conn until a full response is received
+//! // read the conn until a full response is received
 //! loop {
-//!     conn.drive().unwrap();
 //!     if let ReceiveOutcome::Payload(r) = conn.receive().unwrap() {
 //!         println!("Response Body: {}", String::from_utf8_lossy(r.body()));
 //!         break;
@@ -157,12 +154,10 @@
 //! let mut pending_publish = Message::Text("hello world!".into());
 //! while let PublishOutcome::Incomplete(pending) = session.publish(pending_publish).unwrap() {
 //!     pending_publish = pending;
-//!     session.drive().unwrap();
 //! }
 //!
-//! // drive and receive messages
+//! // receive messages
 //! loop {
-//!     session.drive().unwrap();
 //!     if let ReceiveOutcome::Payload(r) = session.receive().unwrap() {
 //!         println!("Received: {:?}", r);
 //!         break;
@@ -211,7 +206,7 @@ use std::{fmt::Debug, io::Error};
 ///
 /// ## Retrying
 ///
-/// The [`Ok`] result of `publish(..)` and `receive(..)` operations may return [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Buffered`], or [`PublishOutcome::Incomplete`].
+/// The [`Ok`] result of `publish(..)` and `receive(..)` operations may return [`ReceiveOutcome::Idle`], [`ReceiveOutcome::Active`], or [`PublishOutcome::Incomplete`].
 /// These outcomes indicate that an operation may need to be retried. See [`ReceiveOutcome`] and [`PublishOutcome`] for more details.
 ///
 /// ## Duty Cycles
@@ -219,6 +214,9 @@ use std::{fmt::Debug, io::Error};
 /// The [`Session::drive`] operation is used to finish connecting and to service reading/writing buffered data and to dispatch callbacks.
 /// Most, but not all, [`Session`] implementations will require periodic calls to [`Session::drive`] in order to function.
 /// Implementations that do not require calls to [`Session::drive`] will no-op when it is called.
+///
+/// [`Receive::receive`] and [`Publish::publish`] will implicitly drive, allowing users to receive or publish/retry in a tight loop without intermediately calling drive.
+/// This means that all [`Publish`] and [`Receive`] implementations must call drive internally.
 ///
 /// ## Publishing
 ///
@@ -273,7 +271,7 @@ pub trait Receive: Session {
 
     /// Attempt to receive a `payload` from the session.
     /// This will return [`ReceiveOutcome::Payload`] when data has been received.
-    /// [`ReceiveOutcome::Buffered`] can be used to report that work was completed, but data is not ready.
+    /// [`ReceiveOutcome::Active`] can be used to report that work was completed, but data is not ready.
     /// This means that only [`ReceiveOutcome::None`] should be used to indicate to a scheduler that yielding or idling is appropriate.
     fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error>;
 }
@@ -286,7 +284,7 @@ pub enum ReceiveOutcome<T> {
     Payload(T),
 
     /// Data was buffered. This means a partial payload was received, but could not be returned as complete `Data`.
-    Buffered,
+    Active,
 
     /// No work was done. This is useful to signal to a scheduler or idle strategy that it may be time to yield.
     Idle,
@@ -295,7 +293,7 @@ impl<T: Debug> Debug for ReceiveOutcome<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReceiveOutcome::Payload(x) => f.write_str(&format!("ReceiveOutcome::Payload({x:?})")),
-            ReceiveOutcome::Buffered => f.write_str("ReceiveOutcome::Buffered"),
+            ReceiveOutcome::Active => f.write_str("ReceiveOutcome::Active"),
             ReceiveOutcome::Idle => f.write_str("ReceiveOutcome::Idle"),
         }
     }
@@ -304,7 +302,7 @@ impl<T: Clone> Clone for ReceiveOutcome<T> {
     fn clone(&self) -> Self {
         match self {
             ReceiveOutcome::Payload(x) => ReceiveOutcome::Payload(x.clone()),
-            ReceiveOutcome::Buffered => ReceiveOutcome::Buffered,
+            ReceiveOutcome::Active => ReceiveOutcome::Active,
             ReceiveOutcome::Idle => ReceiveOutcome::Idle,
         }
     }

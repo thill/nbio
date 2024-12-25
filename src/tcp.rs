@@ -418,6 +418,7 @@ impl Publish for TcpSession {
         &mut self,
         data: Self::PublishPayload<'a>,
     ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
+        // this impl's drive is only used for establishing a connection, so it does not need to be called here
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connected(x)) => Ok(x),
             Some(TcpConnection::AddressResolution(_, _)) => Err(Error::new(
@@ -495,6 +496,7 @@ impl Flush for TcpSession {
 impl Receive for TcpSession {
     type ReceivePayload<'a> = &'a [u8];
     fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
+        self.drive()?;
         let stream = match self.connection.as_mut() {
             Some(TcpConnection::Connected(x)) => Ok(x),
             Some(TcpConnection::Initializing(_, _, _, _)) => Err(Error::new(

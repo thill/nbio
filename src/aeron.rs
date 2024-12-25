@@ -567,6 +567,7 @@ impl Receive for Subscription<Buffer> {
     fn receive<'a>(
         &'a mut self,
     ) -> Result<crate::ReceiveOutcome<Self::ReceivePayload<'a>>, io::Error> {
+        self.drive()?;
         match &mut self.state.connection {
             SubscriptionConnection::Connected(subscription) => {
                 if let SubscriptionHandler::Receiver(received) = &mut self.state.handler {
@@ -608,6 +609,7 @@ impl Receive for Subscription<Message> {
     fn receive<'a>(
         &'a mut self,
     ) -> Result<crate::ReceiveOutcome<Self::ReceivePayload<'a>>, io::Error> {
+        self.drive()?;
         match &mut self.state.connection {
             SubscriptionConnection::Connected(subscription) => {
                 if let SubscriptionHandler::Receiver(received) = &mut self.state.handler {
@@ -793,7 +795,7 @@ impl Publish for Publication<Buffer> {
         &mut self,
         payload: Self::PublishPayload<'a>,
     ) -> Result<crate::PublishOutcome<Self::PublishPayload<'a>>, std::io::Error> {
-        match &self.state.connection {
+        let outcome = match &self.state.connection {
             PublicationConnection::Connected(publication) => {
                 let result = unsafe {
                     aeron_publication_offer(
@@ -807,7 +809,10 @@ impl Publish for Publication<Buffer> {
                 Self::map_result(payload, result)
             }
             _ => Err(io::Error::new(io::ErrorKind::NotConnected, "not connected")),
-        }
+        }?;
+        // drive after buffering publish
+        self.drive()?;
+        Ok(outcome)
     }
 }
 impl Publish for Publication<Message> {
@@ -816,7 +821,7 @@ impl Publish for Publication<Message> {
         &mut self,
         payload: Self::PublishPayload<'a>,
     ) -> Result<crate::PublishOutcome<Self::PublishPayload<'a>>, std::io::Error> {
-        match &self.state.connection {
+        let outcome = match &self.state.connection {
             PublicationConnection::Connected(publication) => {
                 let payload_ptr: *const Self::PublishPayload<'a> = &payload;
                 let result = unsafe {
@@ -831,7 +836,9 @@ impl Publish for Publication<Message> {
                 Self::map_result(payload, result)
             }
             _ => Err(io::Error::new(io::ErrorKind::NotConnected, "not connected")),
-        }
+        }?;
+        self.drive()?;
+        Ok(outcome)
     }
 }
 impl<T: AeronMarker> Debug for Publication<T> {

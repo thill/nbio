@@ -47,7 +47,6 @@ mod tests {
         let mut remaining = publish_payload.as_slice();
         while let PublishOutcome::Incomplete(pw) = client.publish(remaining).unwrap() {
             remaining = pw;
-            client.drive().unwrap();
             if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
                 receive_payload = Some(Vec::from(receive));
             }
@@ -55,7 +54,6 @@ mod tests {
 
         // drive publish from client while receiveing single payload from session
         while let None = receive_payload {
-            client.drive().unwrap();
             if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
                 receive_payload = Some(Vec::from(receive));
             }
@@ -162,7 +160,6 @@ mod tests {
             // send the message with the client while receiveing it with the server session
             let mut remaining = m.as_bytes();
             while let PublishOutcome::Incomplete(pw) = client.publish(remaining).unwrap() {
-                client.drive().unwrap();
                 remaining = pw;
                 backpressure = true;
                 // only receive when backpressure is encountered to simulate a slow consumer

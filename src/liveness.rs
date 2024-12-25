@@ -196,7 +196,7 @@ where
         &'a mut self,
     ) -> Result<crate::ReceiveOutcome<Self::ReceivePayload<'a>>, std::io::Error> {
         let r = self.session.receive()?;
-        if let ReceiveOutcome::Payload(_) | ReceiveOutcome::Buffered = r {
+        if let ReceiveOutcome::Payload(_) | ReceiveOutcome::Active = r {
             if self.strategy.receive {
                 self.liveness = SystemTime::now() + self.timeout;
             }
@@ -244,7 +244,7 @@ where
 /// Used by [`LivenessSession`] to determine when to reset the `liveness` timestamp.
 ///
 /// Checks:
-/// - `receive`: resets when a call to `receive` results in [`ReceiveOutcome::Payload`] or [`ReceiveOutcome::Buffered`]
+/// - `receive`: resets when a call to `receive` results in [`ReceiveOutcome::Payload`] or [`ReceiveOutcome::Active`]
 /// - `publish`: resets when a call to `publish` results in [`PublishOutcome::Published`]
 /// - `drive`: resets when a call to `drive` results in [`DriveOutcome::Active`]
 ///

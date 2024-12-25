@@ -264,6 +264,7 @@ impl Receive for HttpClientSession {
     type ReceivePayload<'a> = hyperium_http::Response<Vec<u8>>;
 
     fn receive<'a>(&'a mut self) -> Result<crate::ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
+        self.drive()?;
         if self.pending_initial_request.is_none() && self.status() == SessionStatus::Established {
             // make the request/response model more straightforward by not requiring checks to `status()` before calling `read`.
             // `self.pending_initial_request.is_none()`: only do this when an initial request is pending, otherwise revert to default `read` behavior for persistent streams.

@@ -138,8 +138,12 @@ where
                 "underlying session is not established",
             ));
         }
-        self.serialize_frame
-            .serialize_frame(frame, &mut self.write_buffer)
+        let outcome = self
+            .serialize_frame
+            .serialize_frame(frame, &mut self.write_buffer)?;
+        // drive after serializing to attempt to immediately send the buffered serialized payload
+        self.drive()?;
+        Ok(outcome)
     }
 }
 impl<S, DF, SF> Flush for FrameDuplex<S, DF, SF>
@@ -185,7 +189,7 @@ where
         }
         let data = match self.session.receive() {
             Ok(ReceiveOutcome::Payload(data)) => data,
-            Ok(ReceiveOutcome::Buffered) => return Ok(ReceiveOutcome::Buffered),
+            Ok(ReceiveOutcome::Active) => return Ok(ReceiveOutcome::Active),
             Ok(ReceiveOutcome::Idle) => return Ok(ReceiveOutcome::Idle),
             Err(err) => {
                 if let ErrorKind::UnexpectedEof = err.kind() {
@@ -204,7 +208,7 @@ where
             }
         };
         self.read_buffer.extend_from_slice(data);
-        Ok(ReceiveOutcome::Buffered)
+        Ok(ReceiveOutcome::Active)
     }
 }
 impl<S, DF, SF> Debug for FrameDuplex<S, DF, SF>
@@ -310,8 +314,12 @@ where
                 "underlying session is not established",
             ));
         }
-        self.framing_strategy
-            .serialize_frame(frame, &mut self.write_buffer)
+        let outcome = self
+            .framing_strategy
+            .serialize_frame(frame, &mut self.write_buffer)?;
+        // drive after serializing to attempt to immediately send the buffered serialized payload
+        self.drive()?;
+        Ok(outcome)
     }
 }
 impl<S, F> Flush for FramePublisher<S, F>
@@ -417,7 +425,7 @@ where
         }
         let data = match self.session.receive() {
             Ok(ReceiveOutcome::Payload(data)) => data,
-            Ok(ReceiveOutcome::Buffered) => return Ok(ReceiveOutcome::Buffered),
+            Ok(ReceiveOutcome::Active) => return Ok(ReceiveOutcome::Active),
             Ok(ReceiveOutcome::Idle) => return Ok(ReceiveOutcome::Idle),
             Err(err) => {
                 if let ErrorKind::UnexpectedEof = err.kind() {
@@ -436,7 +444,7 @@ where
             }
         };
         self.read_buffer.extend_from_slice(data);
-        Ok(ReceiveOutcome::Buffered)
+        Ok(ReceiveOutcome::Active)
     }
 }
 impl<S, F> Debug for FrameReceiver<S, F>

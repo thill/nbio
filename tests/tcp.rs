@@ -80,7 +80,6 @@ mod tests {
         let mut remaining = request.as_slice();
         while let Ok(PublishOutcome::Incomplete(pw)) = client.publish(remaining) {
             remaining = pw;
-            client.drive().unwrap();
         }
 
         // receive (some of) response
@@ -114,7 +113,6 @@ mod tests {
         let mut remaining = request.as_slice();
         while let Ok(PublishOutcome::Incomplete(pw)) = client.publish(remaining) {
             remaining = pw;
-            client.drive().unwrap();
         }
 
         // receive (some of) response

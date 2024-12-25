@@ -162,6 +162,7 @@ impl Receive for WebSocketSession {
     type ReceivePayload<'a> = Message<'a>;
 
     fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
+        self.drive()?;
         match &mut self.session {
             None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
             Some(session) => {
@@ -183,6 +184,7 @@ impl Publish for WebSocketSession {
         &mut self,
         data: Self::PublishPayload<'a>,
     ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
+        // drive is called in `FrameDuplex` `Publish` impl
         match &mut self.session {
             None => Err(Error::new(ErrorKind::NotConnected, "not connected")),
             Some(x) => x.publish(data),

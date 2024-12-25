@@ -103,7 +103,7 @@ where
     fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
         Ok(match self.session.receive()? {
             ReceiveOutcome::Idle => ReceiveOutcome::Idle,
-            ReceiveOutcome::Buffered => ReceiveOutcome::Buffered,
+            ReceiveOutcome::Active => ReceiveOutcome::Active,
             ReceiveOutcome::Payload(payload) => ReceiveOutcome::Payload((self.func)(payload)),
         })
     }
