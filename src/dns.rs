@@ -5,42 +5,43 @@ use std::{
     net::{SocketAddr, ToSocketAddrs},
 };
 
-pub(crate) const STD_NAME_RESOLVER_PROVIDER: StdNameResolverProvider = StdNameResolverProvider;
+pub(crate) const STD_NAME_RESOLVER_PROVIDER: StdAddrResolverProvider = StdAddrResolverProvider;
 
-/// Provides instances of [`NameResolver`] for a given string
-pub trait NameResolverProvider {
-    fn start(&self, s: String) -> Box<dyn NameResolver>;
+/// Provides instances of [`AddrResolver`] for a given string
+pub trait AddrResolverProvider {
+    fn start(&self, s: String) -> Box<dyn AddrResolver>;
 }
 
-/// Polls a [`NameResolutionOutcome`] to completion.
-pub trait NameResolver {
-    fn poll(&mut self) -> Result<NameResolutionOutcome, Error>;
+/// Polls a [`AddrResolutionOutcome`] to completion.
+pub trait AddrResolver: Send {
+    fn poll(&mut self) -> Result<AddrResolutionOutcome, Error>;
 }
-/// [`NameResolver`] outcome that can be polled to completion.
-pub enum NameResolutionOutcome {
+
+/// [`AddrResolver`] outcome that can be polled to completion.
+pub enum AddrResolutionOutcome {
     Idle,
     Active,
     Resolved(Vec<SocketAddr>),
 }
 
-/// Provides instances of [`StdNameResolver`]
-pub struct StdNameResolverProvider;
-impl NameResolverProvider for StdNameResolverProvider {
-    fn start(&self, s: String) -> Box<dyn NameResolver> {
-        Box::new(StdNameResolver { s: Some(s) })
+/// Provides instances of [`StdAddrResolver`]
+pub struct StdAddrResolverProvider;
+impl AddrResolverProvider for StdAddrResolverProvider {
+    fn start(&self, s: String) -> Box<dyn AddrResolver> {
+        Box::new(StdAddrResolver { s: Some(s) })
     }
 }
 
 /// Uses [`ToSocketAddrs`], which may block
-pub struct StdNameResolver {
+pub struct StdAddrResolver {
     s: Option<String>,
 }
-impl NameResolver for StdNameResolver {
-    fn poll(&mut self) -> Result<NameResolutionOutcome, Error> {
+impl AddrResolver for StdAddrResolver {
+    fn poll(&mut self) -> Result<AddrResolutionOutcome, Error> {
         match self.s.take() {
             Some(x) => x
                 .to_socket_addrs()
-                .map(|x| NameResolutionOutcome::Resolved(x.collect())),
+                .map(|x| AddrResolutionOutcome::Resolved(x.collect())),
             None => Err(Error::new(ErrorKind::Other, "done!")),
         }
     }

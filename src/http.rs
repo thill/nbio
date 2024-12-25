@@ -14,7 +14,7 @@ use tcp_stream::{OwnedTLSConfig, TLSConfig};
 
 use crate::{
     buffer::GrowableCircleBuf,
-    dns::NameResolverProvider,
+    dns::AddrResolverProvider,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
     DriveOutcome, Flush, Publish, PublishOutcome, Receive, Session, SessionStatus,
@@ -124,7 +124,7 @@ impl HttpClient {
         host: &str,
         port: u16,
         scheme: Scheme,
-        name_resolver_provider: Option<&dyn NameResolverProvider>,
+        name_resolver_provider: Option<&dyn AddrResolverProvider>,
     ) -> Result<HttpClientSession, io::Error> {
         let mut conn = TcpSession::connect(format!("{host}:{port}"), name_resolver_provider)?;
         if scheme == Scheme::Https {
@@ -150,7 +150,7 @@ impl HttpClient {
     pub fn request<I: IntoBody>(
         &mut self,
         request: hyperium_http::Request<I>,
-        name_resolver_provider: Option<&dyn NameResolverProvider>,
+        name_resolver_provider: Option<&dyn AddrResolverProvider>,
     ) -> Result<HttpClientSession, io::Error> {
         let (parts, body) = request.into_parts();
         let request = hyperium_http::Request::from_parts(parts, body.into_body());
@@ -194,7 +194,7 @@ pub(crate) fn connect_stream(
     host: Option<&str>,
     port: Option<u16>,
     tls_config: TLSConfig<'_, '_, '_>,
-    name_resolver_provider: Option<&dyn NameResolverProvider>,
+    name_resolver_provider: Option<&dyn AddrResolverProvider>,
 ) -> Result<TcpSession, Error> {
     let host = match host {
         Some(x) => x.to_owned(),

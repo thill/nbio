@@ -5,7 +5,7 @@ mod tests {
     use http::{Request, StatusCode};
 
     use nbio::{
-        dns::StdNameResolverProvider, http::HttpClient, Publish, Receive, ReceiveOutcome, Session,
+        dns::StdAddrResolverProvider, http::HttpClient, Publish, Receive, ReceiveOutcome, Session,
     };
 
     #[test]
@@ -15,7 +15,7 @@ mod tests {
         let mut conn = client
             .request(
                 Request::get("https://www.google.com").body(()).unwrap(),
-                Some(&StdNameResolverProvider),
+                Some(&StdAddrResolverProvider),
             )
             .unwrap();
 
@@ -59,7 +59,7 @@ mod tests {
         let mut conn = client
             .request(
                 Request::get("http://icanhazip.com").body(()).unwrap(),
-                Some(&StdNameResolverProvider),
+                Some(&StdAddrResolverProvider),
             )
             .unwrap();
 

@@ -15,13 +15,13 @@ use tcp_stream::{
 };
 
 use crate::{
-    dns::{NameResolutionOutcome, NameResolver, NameResolverProvider, STD_NAME_RESOLVER_PROVIDER},
+    dns::{AddrResolutionOutcome, AddrResolver, AddrResolverProvider, STD_NAME_RESOLVER_PROVIDER},
     DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
 /// Internal state machine of a TCP connection
 enum TcpConnection {
-    AddressResolution(Box<dyn NameResolver>, Option<(String, OwnedTLSConfig)>),
+    AddressResolution(Box<dyn AddrResolver>, Option<(String, OwnedTLSConfig)>),
     Initializing(
         mio::net::TcpStream,
         mio::Poll,
@@ -124,10 +124,10 @@ impl TcpSession {
     /// Connect to the given socket address.
     ///
     /// This will start connecting using mio, then will transition over to TcpStream by transferring the raw FD or socket.
-    /// If `name_resolver_provider` is None, [`crate::dns::StdNameResolverProvider`] will be used.
+    /// If `name_resolver_provider` is None, [`crate::dns::StdAddrResolverProvider`] will be used.
     pub fn connect<S: Into<String>>(
         addr: S,
-        name_resolver_provider: Option<&dyn NameResolverProvider>,
+        name_resolver_provider: Option<&dyn AddrResolverProvider>,
     ) -> Result<Self, Error> {
         let name_resolver_provider = name_resolver_provider.unwrap_or(&STD_NAME_RESOLVER_PROVIDER);
         let mut read_buffer = Vec::new();
@@ -316,15 +316,15 @@ impl Session for TcpSession {
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
         match self.connection.take() {
             Some(TcpConnection::AddressResolution(mut x, tls)) => match x.poll()? {
-                NameResolutionOutcome::Idle => {
+                AddrResolutionOutcome::Idle => {
                     self.connection = Some(TcpConnection::AddressResolution(x, tls));
                     Ok(DriveOutcome::Idle)
                 }
-                NameResolutionOutcome::Active => {
+                AddrResolutionOutcome::Active => {
                     self.connection = Some(TcpConnection::AddressResolution(x, tls));
                     Ok(DriveOutcome::Active)
                 }
-                NameResolutionOutcome::Resolved(addrs) => {
+                AddrResolutionOutcome::Resolved(addrs) => {
                     let (stream, poll) = Self::addr_to_stream(addrs)?;
                     let events = mio::Events::with_capacity(1);
                     self.connection = Some(TcpConnection::Initializing(stream, poll, events, tls));

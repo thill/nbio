@@ -3,7 +3,7 @@ mod tests {
     use tcp_stream::TLSConfig;
 
     use nbio::{
-        dns::StdNameResolverProvider,
+        dns::StdAddrResolverProvider,
         tcp::{TcpServer, TcpSession},
         Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
     };
@@ -133,7 +133,7 @@ mod tests {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:33002").unwrap();
         let mut client =
-            TcpSession::connect("127.0.0.1:33002", Some(&StdNameResolverProvider)).unwrap();
+            TcpSession::connect("127.0.0.1:33002", Some(&StdAddrResolverProvider)).unwrap();
         client.drive().unwrap();
         let mut session = server.accept().unwrap().unwrap().0;
 

@@ -18,7 +18,7 @@ use tungstenite::{
 };
 
 use crate::{
-    dns::NameResolverProvider,
+    dns::AddrResolverProvider,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     http::Scheme,
     tcp::TcpSession,
@@ -46,7 +46,7 @@ impl WebSocketSession {
     pub fn connect<I: IntoClientRequest>(
         request: I,
         tls_config: Option<TLSConfig<'_, '_, '_>>,
-        name_resolver_provider: Option<&dyn NameResolverProvider>,
+        name_resolver_provider: Option<&dyn AddrResolverProvider>,
     ) -> Result<Self, Error> {
         let request = request
             .into_client_request()
