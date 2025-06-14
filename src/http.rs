@@ -404,8 +404,8 @@ impl DeserializeFrame for Http1ResponseDeserializer {
         }
 
         // use parsed BodyInfo to check if entire body has been received
-        let parsed_body = match &self.body_info {
-            None => None,
+        let (parsed_body, total_size) = match &self.body_info {
+            None => (None, 0),
             Some(body_info) => {
                 match body_info.ty {
                     BodyType::ChunkedTransfer => {
@@ -416,31 +416,35 @@ impl DeserializeFrame for Http1ResponseDeserializer {
                             let mut decoder =
                                 chunked_transfer::Decoder::new(&data[body_info.offset..]);
                             decoder.read_to_end(&mut body)?;
+                            let body_len = body.len();
                             match decoder.remaining_chunks_size() {
-                                None => Some(body),
-                                Some(_) => None,
+                                None => (Some(body), body_info.offset + body_len),
+                                Some(_) => (None, 0),
                             }
                         } else {
-                            None
+                            (None, 0)
                         }
                     }
                     BodyType::ContentLength(content_length) => {
                         // read to given length
                         let total_length = body_info.offset + content_length;
                         if data.len() >= total_length {
-                            Some(data[body_info.offset..total_length].to_vec())
+                            (
+                                Some(data[body_info.offset..total_length].to_vec()),
+                                total_length,
+                            )
                         } else {
-                            None
+                            (None, 0)
                         }
                     }
                     BodyType::OnClose => {
                         if eof {
-                            Some(data[body_info.offset..].to_vec())
+                            (Some(data[body_info.offset..].to_vec()), data.len())
                         } else {
-                            None
+                            (None, 0)
                         }
                     }
-                    BodyType::None => Some(Vec::new()),
+                    BodyType::None => (Some(Vec::new()), body_info.offset),
                 }
             }
         };
@@ -461,6 +465,7 @@ impl DeserializeFrame for Http1ResponseDeserializer {
                 swap(deserialized_response.body_mut(), &mut body);
                 // reset parsed body info for next response parsing iteration, allowing for use of keep-alive
                 self.body_info = None;
+                self.deserialized_size = total_size;
                 Ok(true)
             }
         }
