@@ -4,32 +4,24 @@ use std::{
     fmt::Debug,
     io::{Error, ErrorKind, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, ToSocketAddrs},
+    sync::Arc,
     time::Duration,
 };
 
-use native_tls::Certificate;
-
-use tcp_stream::{
-    HandshakeError, HandshakeResult, MidHandshakeTlsStream, NativeTlsConnector, OwnedIdentity,
-    OwnedTLSConfig, TLSConfig, TcpStream,
-};
+use tcp_stream::TcpStream;
 
 use crate::{
     dns::{AddrResolutionOutcome, AddrResolver, AddrResolverProvider, STD_NAME_RESOLVER_PROVIDER},
+    tls::{IntoTls, IntoTlsOutcome, TlsConnector},
     DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
 /// Internal state machine of a TCP connection
 enum TcpConnection {
-    AddressResolution(Box<dyn AddrResolver>, Option<(String, OwnedTLSConfig)>),
-    Initializing(
-        mio::net::TcpStream,
-        mio::Poll,
-        mio::Events,
-        Option<(String, OwnedTLSConfig)>,
-    ),
+    AddressResolution(Box<dyn AddrResolver>, Option<String>),
+    Initializing(mio::net::TcpStream, mio::Poll, mio::Events, Option<String>),
     Connecting(TcpStream),
-    MidTlsHandshake(MidHandshakeTlsStream),
+    IntoTls(IntoTls),
     Connected(TcpStream),
 }
 impl Debug for TcpConnection {
@@ -38,7 +30,7 @@ impl Debug for TcpConnection {
             Self::AddressResolution(_, _) => "AddressResolution",
             Self::Initializing(_, _, _, _) => "Initializing",
             Self::Connecting(_) => "Connecting",
-            Self::MidTlsHandshake(_) => "MidTlsHandshake",
+            Self::IntoTls(_) => "IntoTls",
             Self::Connected(_) => "Connected",
         };
         f.write_str(s)
@@ -57,7 +49,7 @@ impl Debug for TcpConnection {
 pub struct TcpSession {
     read_buffer: Vec<u8>,
     connection: Option<TcpConnection>,
-    accept_invalid_hostnames: bool,
+    tls_connector: Option<Arc<TlsConnector>>,
 }
 impl TcpSession {
     /// Create a TcpSession that wraps an existing [`TcpStream`]
@@ -82,8 +74,14 @@ impl TcpSession {
                 Some(TcpConnection::Connecting(stream))
             },
             read_buffer,
-            accept_invalid_hostnames: false,
+            tls_connector: None,
         })
+    }
+
+    /// Set the [`TlsConnector`] to use for a TLS handshake.
+    pub fn tls_connector(mut self, tls_connector: Arc<TlsConnector>) -> Self {
+        self.tls_connector = Some(tls_connector);
+        self
     }
 
     /// Set the underlying read buffer capacity, which must be greater than or equal to the current read buffer length
@@ -128,6 +126,7 @@ impl TcpSession {
     pub fn connect<S: Into<String>>(
         addr: S,
         name_resolver_provider: Option<&dyn AddrResolverProvider>,
+        tls_connector: Option<Arc<TlsConnector>>,
     ) -> Result<Self, Error> {
         let name_resolver_provider = name_resolver_provider.unwrap_or(&STD_NAME_RESOLVER_PROVIDER);
         let mut read_buffer = Vec::new();
@@ -138,7 +137,7 @@ impl TcpSession {
                 None,
             )),
             read_buffer,
-            accept_invalid_hostnames: false,
+            tls_connector,
         })
     }
 
@@ -146,21 +145,14 @@ impl TcpSession {
     ///
     /// While the TLS handshake is in progress, [`Session::status`] will return [`SessionStatus::Connecting`].
     /// The TLS handshake can be driven to completion by calling the [`Session::drive`] function
-    pub fn into_tls(mut self, domain: &str, config: TLSConfig<'_, '_, '_>) -> Result<Self, Error> {
+    pub fn into_tls(mut self, domain: &str) -> Result<Self, Error> {
         let stream = match self.connection.take() {
             Some(TcpConnection::Initializing(stream, poll, events, None)) => {
-                let config = OwnedTLSConfig {
-                    identity: config.identity.map(|x| OwnedIdentity {
-                        der: x.der.to_vec(),
-                        password: x.password.to_owned(),
-                    }),
-                    cert_chain: config.cert_chain.map(|x| x.to_owned()),
-                };
                 self.connection = Some(TcpConnection::Initializing(
                     stream,
                     poll,
                     events,
-                    Some((domain.to_owned(), config)),
+                    Some(domain.to_owned()),
                 ));
                 return Ok(self);
             }
@@ -172,43 +164,22 @@ impl TcpSession {
             }
             Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
-            Some(TcpConnection::MidTlsHandshake(_)) => {
+            Some(TcpConnection::IntoTls(_)) => {
                 return Err(Error::new(ErrorKind::Other, "stream already mid-handshake"))
             }
             Some(TcpConnection::AddressResolution(x, _)) => {
-                let config = OwnedTLSConfig {
-                    identity: config.identity.map(|x| OwnedIdentity {
-                        der: x.der.to_vec(),
-                        password: x.password.to_owned(),
-                    }),
-                    cert_chain: config.cert_chain.map(|x| x.to_owned()),
-                };
-                self.connection = Some(TcpConnection::AddressResolution(
-                    x,
-                    Some((domain.to_owned(), config)),
-                ));
+                self.connection =
+                    Some(TcpConnection::AddressResolution(x, Some(domain.to_owned())));
                 return Ok(self);
             }
             None => return Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         };
-        match stream.into_tls(domain, config) {
-            Ok(x) => {
-                self.connection = Some(TcpConnection::Connected(x));
-            }
-            Err(err) => match err {
-                HandshakeError::WouldBlock(x) => {
-                    self.connection = Some(TcpConnection::MidTlsHandshake(x));
-                }
-                HandshakeError::Failure(err) => return Err(err),
-            },
-        }
+        let into_tls = match self.tls_connector.as_ref() {
+            Some(x) => x.start(stream, domain)?,
+            None => TlsConnector::try_default()?.start(stream, domain)?,
+        };
+        self.connection = Some(TcpConnection::IntoTls(into_tls));
         Ok(self)
-    }
-
-    /// Set whether we should accept invalid hostnames or not
-    pub fn with_accept_invalid_hostnames(mut self, accept_invalid_hostnames: bool) -> Self {
-        self.accept_invalid_hostnames = accept_invalid_hostnames;
-        self
     }
 
     /// Set read_timeout on the underlying stream
@@ -252,7 +223,7 @@ impl TcpSession {
             )),
             Some(TcpConnection::Connecting(x)) => Ok(x),
             Some(TcpConnection::Connected(x)) => Ok(x),
-            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+            Some(TcpConnection::IntoTls(_)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream is mid-handshake",
             )),
@@ -263,43 +234,6 @@ impl TcpSession {
             None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         }
     }
-
-    fn into_tls_impl(
-        &self,
-        s: TcpStream,
-        domain: &str,
-        config: TLSConfig<'_, '_, '_>,
-    ) -> HandshakeResult {
-        let mut builder = NativeTlsConnector::builder();
-        if self.accept_invalid_hostnames {
-            builder.danger_accept_invalid_hostnames(true);
-        }
-
-        if let Some(identity) = config.identity {
-            builder.identity(
-                native_tls::Identity::from_pkcs12(&identity.der, identity.password)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-            );
-        }
-
-        if let Some(cert_chain) = config.cert_chain {
-            let mut cert_chain = std::io::BufReader::new(cert_chain.as_bytes());
-            for cert in rustls_pemfile::read_all(&mut cert_chain) {
-                if let rustls_pemfile::Item::X509Certificate(cert) = cert? {
-                    builder.add_root_certificate(
-                        Certificate::from_der(&cert[..])
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-                    );
-                }
-            }
-        }
-
-        let connector = builder
-            .build()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-
-        s.into_native_tls(&connector, domain)
-    }
 }
 impl Session for TcpSession {
     fn status(&self) -> SessionStatus {
@@ -307,7 +241,7 @@ impl Session for TcpSession {
             None => SessionStatus::Terminated,
             Some(TcpConnection::Connected(_)) => SessionStatus::Established,
             Some(TcpConnection::Connecting(_))
-            | Some(TcpConnection::MidTlsHandshake(_))
+            | Some(TcpConnection::IntoTls(_))
             | Some(TcpConnection::Initializing(_, _, _, _))
             | Some(TcpConnection::AddressResolution(_, _)) => SessionStatus::Establishing,
         }
@@ -350,19 +284,12 @@ impl Session for TcpSession {
                         stream.set_nodelay(true)?;
                         match tls {
                             None => self.connection = Some(TcpConnection::Connected(stream)),
-                            Some((domain, config)) => {
-                                match self.into_tls_impl(stream, &domain, config.as_ref()) {
-                                    Ok(x) => {
-                                        self.connection = Some(TcpConnection::Connected(x));
-                                    }
-                                    Err(err) => match err {
-                                        HandshakeError::WouldBlock(x) => {
-                                            self.connection =
-                                                Some(TcpConnection::MidTlsHandshake(x));
-                                        }
-                                        HandshakeError::Failure(err) => return Err(err),
-                                    },
-                                }
+                            Some(domain) => {
+                                let into_tls = match self.tls_connector.as_ref() {
+                                    Some(x) => x.start(stream, &domain)?,
+                                    None => TlsConnector::try_default()?.start(stream, &domain)?,
+                                };
+                                self.connection = Some(TcpConnection::IntoTls(into_tls));
                             }
                         }
                         Ok(DriveOutcome::Active)
@@ -391,21 +318,19 @@ impl Session for TcpSession {
                     Ok(DriveOutcome::Idle)
                 }
             }
-            Some(TcpConnection::MidTlsHandshake(x)) => match x.handshake() {
-                Ok(x) => {
+            Some(TcpConnection::IntoTls(mut x)) => match x.poll()? {
+                IntoTlsOutcome::Finished(x) => {
                     self.connection = Some(TcpConnection::Connected(x));
                     Ok(DriveOutcome::Active)
                 }
-                Err(err) => match err {
-                    HandshakeError::WouldBlock(x) => {
-                        self.connection = Some(TcpConnection::MidTlsHandshake(x));
-                        Ok(DriveOutcome::Idle)
-                    }
-                    HandshakeError::Failure(err) => {
-                        self.connection = None;
-                        Err(err)
-                    }
-                },
+                IntoTlsOutcome::Active => {
+                    self.connection = Some(TcpConnection::IntoTls(x));
+                    Ok(DriveOutcome::Active)
+                }
+                IntoTlsOutcome::Idle => {
+                    self.connection = Some(TcpConnection::IntoTls(x));
+                    Ok(DriveOutcome::Idle)
+                }
             },
             None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         }
@@ -432,7 +357,7 @@ impl Publish for TcpSession {
             Some(TcpConnection::Connecting(_)) => {
                 Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
             }
-            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+            Some(TcpConnection::IntoTls(_)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream is mid-handshake",
             )),
@@ -484,7 +409,7 @@ impl Flush for TcpSession {
                 ErrorKind::NotConnected,
                 "stream in address resolution",
             )),
-            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+            Some(TcpConnection::IntoTls(_)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream is mid-handshake",
             )),
@@ -510,7 +435,7 @@ impl Receive for TcpSession {
             Some(TcpConnection::Connecting(_)) => {
                 Err(Error::new(ErrorKind::NotConnected, "stream is connecting"))
             }
-            Some(TcpConnection::MidTlsHandshake(_)) => Err(Error::new(
+            Some(TcpConnection::IntoTls(_)) => Err(Error::new(
                 ErrorKind::NotConnected,
                 "stream is mid-handshake",
             )),
@@ -556,7 +481,7 @@ impl Drop for TcpSession {
                     stream.shutdown(Shutdown::Both).ok()
                 }
                 TcpConnection::AddressResolution(_, _) => Some(()),
-                TcpConnection::MidTlsHandshake(x) => x.get_mut().shutdown(Shutdown::Both).ok(),
+                TcpConnection::IntoTls(_) => None,
             };
         }
     }

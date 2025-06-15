@@ -12,7 +12,7 @@ mod tests {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34001").unwrap();
         let mut client =
-            TcpSession::connect("127.0.0.1:34001", Some(&StdAddrResolverProvider)).unwrap();
+            TcpSession::connect("127.0.0.1:34001", Some(&StdAddrResolverProvider), None).unwrap();
         client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 
@@ -69,7 +69,7 @@ mod tests {
     fn one_large_frame() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34002").unwrap();
-        let mut client = TcpSession::connect("127.0.0.1:34002", None).unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:34002", None, None).unwrap();
         client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 
@@ -127,7 +127,7 @@ mod tests {
     fn framing_slow_consumer() {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34003").unwrap();
-        let mut client = TcpSession::connect("127.0.0.1:34003", None).unwrap();
+        let mut client = TcpSession::connect("127.0.0.1:34003", None, None).unwrap();
         client.drive().unwrap();
         let session = server.accept().unwrap().unwrap().0;
 

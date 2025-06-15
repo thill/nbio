@@ -61,7 +61,7 @@
 //! use nbio::tcp::TcpSession;
 //!
 //! // establish connection
-//! let mut client = TcpSession::connect("192.168.123.456:54321", None).unwrap();
+//! let mut client = TcpSession::connect("192.168.123.456:54321", None, None).unwrap();
 //!
 //! // publish some bytes until completion
 //! let mut pending_publish = "hello world!".as_bytes();
@@ -88,7 +88,7 @@
 //! use nbio::frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer};
 //!
 //! // establish connection wrapped in a framing session
-//! let client = TcpSession::connect("192.168.123.456:54321", None).unwrap();
+//! let client = TcpSession::connect("192.168.123.456:54321", None, None).unwrap();
 //! let mut client = FrameDuplex::new(client, U64FrameDeserializer::new(), U64FrameSerializer::new(), 4096);
 //!
 //! // publish some bytes until completion
@@ -191,6 +191,7 @@ pub mod mock;
 pub mod mpsc;
 #[cfg(any(feature = "tcp"))]
 pub mod tcp;
+pub mod tls;
 #[cfg(any(feature = "websocket"))]
 pub mod websocket;
 

@@ -4,19 +4,21 @@ use std::{
     io::{self, Error, ErrorKind, Read},
     mem::swap,
     str::FromStr,
+    sync::Arc,
 };
 
 use hyperium_http::{
     header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
     Response,
 };
-use tcp_stream::{OwnedTLSConfig, TLSConfig};
+use tcp_stream::OwnedTLSConfig;
 
 use crate::{
     buffer::GrowableCircleBuf,
     dns::AddrResolverProvider,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
+    tls::{NativeTlsConnector, TlsConnector},
     DriveOutcome, Flush, Publish, PublishOutcome, Receive, Session, SessionStatus,
 };
 
@@ -93,20 +95,29 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 /// }
 /// ```
 pub struct HttpClient {
-    tls_config: OwnedTLSConfig,
+    tls_connector: Option<Arc<TlsConnector>>,
 }
 impl HttpClient {
     /// Create a new HttpClient
     pub fn new() -> Self {
         Self {
-            tls_config: OwnedTLSConfig::default(),
+            tls_connector: None,
         }
     }
 
-    /// Override the default TLS config
-    pub fn with_tls_config(mut self, tls_config: OwnedTLSConfig) -> Self {
-        self.tls_config = tls_config;
+    /// Set the [`TlsConnector`] to use for a TLS handshakes.
+    pub fn with_tls_connector(mut self, tls_connector: Arc<TlsConnector>) -> Self {
+        self.tls_connector = Some(tls_connector);
         self
+    }
+
+    /// Create a native TLS connector with the given config
+    pub fn with_tls_config(mut self, tls_config: OwnedTLSConfig) -> Result<Self, Error> {
+        self.tls_connector = Some(Arc::new(TlsConnector::Native(NativeTlsConnector::new(
+            tls_config.as_ref(),
+            false,
+        )?)));
+        Ok(self)
     }
 
     /// Initiate a new HTTP connection that is ready for a new request.
@@ -126,9 +137,13 @@ impl HttpClient {
         scheme: Scheme,
         name_resolver_provider: Option<&dyn AddrResolverProvider>,
     ) -> Result<HttpClientSession, io::Error> {
-        let mut conn = TcpSession::connect(format!("{host}:{port}"), name_resolver_provider)?;
+        let mut conn = TcpSession::connect(
+            format!("{host}:{port}"),
+            name_resolver_provider,
+            self.tls_connector.as_ref().map(|x| Arc::clone(&x)),
+        )?;
         if scheme == Scheme::Https {
-            conn = conn.into_tls(&host, self.tls_config.as_ref())?;
+            conn = conn.into_tls(&host)?;
         }
         Ok(HttpClientSession::new(FrameDuplex::new(
             conn,
@@ -169,8 +184,8 @@ impl HttpClient {
             scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
-            self.tls_config.as_ref(),
             name_resolver_provider,
+            self.tls_connector.as_ref().map(|x| Arc::clone(&x)),
         )?;
         let mut conn = HttpClientSession::new(FrameDuplex::new(
             session,
@@ -193,8 +208,8 @@ pub(crate) fn connect_stream(
     scheme: Scheme,
     host: Option<&str>,
     port: Option<u16>,
-    tls_config: TLSConfig<'_, '_, '_>,
     name_resolver_provider: Option<&dyn AddrResolverProvider>,
+    tls_connector: Option<Arc<TlsConnector>>,
 ) -> Result<TcpSession, Error> {
     let host = match host {
         Some(x) => x.to_owned(),
@@ -204,10 +219,14 @@ pub(crate) fn connect_stream(
         Some(x) => x,
         None => scheme.default_port(),
     };
-    let mut conn = TcpSession::connect(format!("{host}:{port}"), name_resolver_provider)?;
+    let mut conn = TcpSession::connect(
+        format!("{host}:{port}"),
+        name_resolver_provider,
+        tls_connector,
+    )?;
     if scheme == Scheme::Https {
         conn = conn
-            .into_tls(&host, tls_config)
+            .into_tls(&host)
             .map_err(|err| Error::new(ErrorKind::ConnectionRefused, err))?;
     }
     Ok(conn)

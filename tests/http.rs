@@ -4,9 +4,7 @@ mod tests {
 
     use http::{Request, StatusCode};
 
-    use nbio::{
-        dns::StdAddrResolverProvider, http::HttpClient, Publish, Receive, ReceiveOutcome, Session,
-    };
+    use nbio::{http::HttpClient, Publish, Receive, ReceiveOutcome, Session};
 
     #[test]
     fn test_google_chunked_response() {
@@ -15,7 +13,7 @@ mod tests {
         let mut conn = client
             .request(
                 Request::get("https://www.google.com").body(()).unwrap(),
-                Some(&StdAddrResolverProvider),
+                None,
             )
             .unwrap();
 
@@ -57,10 +55,7 @@ mod tests {
         // create the client and make the initial request
         let mut client = HttpClient::new();
         let mut conn = client
-            .request(
-                Request::get("http://icanhazip.com").body(()).unwrap(),
-                Some(&StdAddrResolverProvider),
-            )
+            .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
             .unwrap();
 
         // receive the conn until the first full response is received

@@ -4,10 +4,11 @@ use std::{
     collections::VecDeque,
     fmt::Debug,
     io::{Cursor, Error, ErrorKind},
+    sync::Arc,
 };
 
 use derived_from_tungstenite::MidClientHandshake;
-use tcp_stream::{TLSConfig, TcpStream};
+use tcp_stream::TcpStream;
 use tungstenite::{
     client::IntoClientRequest,
     error::ProtocolError,
@@ -22,6 +23,7 @@ use crate::{
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     http::Scheme,
     tcp::TcpSession,
+    tls::TlsConnector,
     DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
@@ -45,8 +47,8 @@ impl WebSocketSession {
     /// To enable automatic pong responses, use [`WebSocketSession::with_automatic_pongs`]
     pub fn connect<I: IntoClientRequest>(
         request: I,
-        tls_config: Option<TLSConfig<'_, '_, '_>>,
         name_resolver_provider: Option<&dyn AddrResolverProvider>,
+        tls_connector: Option<Arc<TlsConnector>>,
     ) -> Result<Self, Error> {
         let request = request
             .into_client_request()
@@ -66,8 +68,8 @@ impl WebSocketSession {
             scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
-            tls_config.unwrap_or_default(),
             name_resolver_provider,
+            tls_connector,
         )?;
         Ok(Self {
             handshake: Some(PendingHandshake::ConnectStream(session, request)),
