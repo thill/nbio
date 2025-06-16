@@ -1,6 +1,6 @@
 [package]
 name = "nbio"
-version = "0.15.1"
+version = "0.16.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Eric Thill"]
@@ -24,7 +24,7 @@ websocket = ["http", "rand", "tcp", "dep:tungstenite"]
 chunked_transfer = { version = "1.4.1", optional = true }
 circbuf = "0.2.1"
 crossbeam-channel = { version = "0.5.13", optional = true }
-http = { version = "0.2.9", optional = true }
+http = { version = "1.3.1", optional = true }
 libc = { version = "0.2.158", optional = true }
 mio = { version = "1.0.2", features = ["net", "os-poll"], optional = true }
 native-tls = "0.2.12"
