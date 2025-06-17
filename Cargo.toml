@@ -1,6 +1,6 @@
 [package]
 name = "nbio"
-version = "0.17.1"
+version = "0.18.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Eric Thill"]
@@ -33,4 +33,4 @@ httparse = { version = "1.8.0", optional = true }
 libaeron-sys = { version = "1.44.1", optional = true }
 rand = { version = "0.8.5", optional = true }
 tcp-stream = { version = "0.30.1", optional = true, features = ["native-tls"]  }
-tungstenite = { version = "0.21.0", optional = true }
+tungstenite = { version = "0.23.0", optional = true }
