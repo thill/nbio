@@ -50,10 +50,16 @@ impl NativeTlsConnector {
         }
 
         if let Some(identity) = config.identity {
-            builder.identity(
-                native_tls::Identity::from_pkcs12(&identity.der, identity.password)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-            );
+            match identity {
+                tcp_stream::Identity::PKCS12 { der, password } => builder.identity(
+                    native_tls::Identity::from_pkcs12(&der, password)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                ),
+                tcp_stream::Identity::PKCS8 { pem, key } => builder.identity(
+                    native_tls::Identity::from_pkcs8(&pem, key)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                ),
+            };
         }
 
         if let Some(cert_chain) = config.cert_chain {
