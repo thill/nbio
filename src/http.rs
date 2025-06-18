@@ -1,8 +1,10 @@
 //! A non-blocking HTTP client
 use std::{
+    cell::RefCell,
     fmt::Debug,
     io::{self, Error, ErrorKind, Read},
     mem::swap,
+    rc::Rc,
     str::FromStr,
     sync::Arc,
 };
@@ -19,7 +21,7 @@ use crate::{
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
     tls::{NativeTlsConnector, TlsConnector},
-    DriveOutcome, Flush, Publish, PublishOutcome, Receive, Session, SessionStatus,
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -124,6 +126,9 @@ impl HttpClient {
     ///
     /// This will return a [`HttpClientSession`], which encapsulates a [`FrameDuplex`] utilizing an HTTP [`FramingStrategy`].
     /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
+    ///
+    /// You may create a [`PersistentHttpConnection`] from the returned [`HttpClientSession`] by calling [`From<HttpClientSession>`] on it,
+    /// is useful for keep-alive request/response coordination across multiple concurrent pending requests.
     ///
     /// The returned [`HttpClientSession`] will have pre-setup TLS for `https` URLs, and will have pre-buffered the serialized request request.
     /// Before calling `read`/`write`, call [`Session::drive()`] to finish connecting and complete any pending TLS handshakes until [`Session::status`]
@@ -313,6 +318,163 @@ impl Debug for HttpClientSession {
         f.debug_struct("HttpClientSession")
             .field("session", &self.session)
             .finish()
+    }
+}
+
+struct PersistentHttpSessionContext {
+    session: HttpClientSession,
+    active_request_id: u64,
+    next_request_id: u64,
+    closed: bool,
+}
+
+/// Encapsulates a [`HttpClientSession`], enabling multiple requests to be queued and used on a single session.
+///
+/// It ensures only one request can be in flight at a time, and will buffer the request until the connection is established.
+/// This utilizes HTTP 1.x keep-alive headers to attempt to re-use the same connection for multiple requests.
+///
+/// Requests are started by calling [`PersistentHttpConnection::request`], which will return a [`PendingHttpResponse`].
+/// These pending http response will coordinate with one another to send requests and drive responses in the order the function was called.
+///
+/// An HTTP server may elect to close an http session at any time.
+/// When this occurs, a new [`PersistentHttpConnection`] must be created from the original [`HttpClient`].
+pub struct PersistentHttpConnection {
+    context: Rc<RefCell<PersistentHttpSessionContext>>,
+}
+
+impl From<HttpClientSession> for PersistentHttpConnection {
+    fn from(session: HttpClientSession) -> Self {
+        Self {
+            context: Rc::new(RefCell::new(PersistentHttpSessionContext {
+                session,
+                active_request_id: 0,
+                next_request_id: 0,
+                closed: false,
+            })),
+        }
+    }
+}
+
+impl Debug for PersistentHttpConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PersistentHttpConnection").finish()
+    }
+}
+
+impl Session for PersistentHttpConnection {
+    fn status(&self) -> crate::SessionStatus {
+        self.context.borrow().session.status()
+    }
+
+    fn drive(&mut self) -> Result<DriveOutcome, Error> {
+        self.context.borrow_mut().session.drive()
+    }
+}
+
+impl PersistentHttpConnection {
+    pub fn request<I: IntoBody>(
+        &mut self,
+        mut request: hyperium_http::Request<I>,
+    ) -> Result<PendingHttpResponse, Error> {
+        // add the keep-alive header to the request
+        request
+            .headers_mut()
+            .insert("Connection", "keep-alive".parse().unwrap());
+
+        // check that the connection was not set to close by the server on the last request
+        let mut context = self.context.borrow_mut();
+        if context.closed {
+            return Err(Error::new(
+                ErrorKind::ConnectionRefused,
+                "connection closed by server",
+            ));
+        }
+
+        // assign the next available request id
+        let request_id = context.next_request_id;
+        context.next_request_id += 1;
+        drop(context);
+
+        // return the pending http response
+        Ok(PendingHttpResponse {
+            context: Rc::clone(&self.context),
+            pending_request: Some(request.into()),
+            request_id,
+        })
+    }
+}
+
+/// A pending or active [`HttpRequest`] for a [`PersistentHttpSession`], which can be polled to completion.
+pub struct PendingHttpResponse {
+    context: Rc<RefCell<PersistentHttpSessionContext>>,
+    pending_request: Option<HttpRequest>,
+    request_id: u64,
+}
+impl Debug for PendingHttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingHttpResponse")
+            .field("request_id", &self.request_id)
+            .finish()
+    }
+}
+impl Session for PendingHttpResponse {
+    fn status(&self) -> crate::SessionStatus {
+        self.context.borrow().session.status()
+    }
+
+    fn drive(&mut self) -> Result<DriveOutcome, Error> {
+        let mut context = self.context.borrow_mut();
+        if context.active_request_id == self.request_id {
+            // is the active request, drive the session
+            context.session.drive()
+        } else {
+            // not the active request, do not drive the session
+            Ok(DriveOutcome::Idle)
+        }
+    }
+}
+impl Receive for PendingHttpResponse {
+    type ReceivePayload<'a> = hyperium_http::Response<Vec<u8>>;
+
+    fn receive<'a>(&'a mut self) -> Result<ReceiveOutcome<Self::ReceivePayload<'a>>, Error> {
+        let mut context = self.context.borrow_mut();
+        // first check if the active request is this request, if not, return idle
+        if context.active_request_id != self.request_id {
+            return Ok(ReceiveOutcome::Idle);
+        }
+
+        // then try to send the request if necessary
+        if let Some(request) = self.pending_request.take() {
+            match context.session.publish(request)? {
+                PublishOutcome::Incomplete(request) => {
+                    self.pending_request = Some(request);
+                    return Ok(ReceiveOutcome::Idle);
+                }
+                PublishOutcome::Published => {
+                    return Ok(ReceiveOutcome::Active);
+                }
+            }
+        }
+
+        // otherwise, attempt to receive the response
+        match context.session.receive()? {
+            ReceiveOutcome::Payload(response) => {
+                // done! advance the active request id, return the response
+                context.active_request_id += 1;
+                // check if the keep-alive header is set to close, this will fail the next request early without needing to attempt and fail when interactive with the wire
+                if response
+                    .headers()
+                    .get("Connection")
+                    .map(|x| x.to_str().unwrap())
+                    == Some("close")
+                {
+                    context.closed = true;
+                }
+                Ok(ReceiveOutcome::Payload(response))
+            }
+            ReceiveOutcome::Active => Ok(ReceiveOutcome::Active),
+            ReceiveOutcome::Idle => Ok(ReceiveOutcome::Idle),
+        }
     }
 }
 
