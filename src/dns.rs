@@ -51,7 +51,7 @@ pub enum IntoAddrOutcome {
 }
 
 /// A request to resolve an address that can be polled to completion.
-pub trait IntoAddr {
+pub trait IntoAddr: Send {
     fn poll(&mut self) -> Result<IntoAddrOutcome, Error>;
 }
 
