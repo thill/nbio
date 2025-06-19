@@ -9,7 +9,7 @@ use std::{
 /// A [`ResolveAddr`] that can handle multiple impls, including dynamic dispatch.
 pub enum AddrResolver {
     ToSocketAddrs(ToSocketAddrResolver),
-    Dyn(Box<dyn ResolveAddr<IntoAddr = Box<dyn IntoAddr>>>),
+    Dyn(Box<dyn ResolveAddr<IntoAddr = Box<dyn IntoAddr>> + Send + Sync>),
 }
 
 impl ResolveAddr for AddrResolver {
