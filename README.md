@@ -41,7 +41,6 @@ By default, features that do not require a special build environment are enabled
 In a production codebase, you will likey want to pick and choose your required features.
 
 Feature list:
-
 - `aeron`
 - `crossbeam`
 - `http`
@@ -51,7 +50,6 @@ Feature list:
 - `websocket`
 
 Features not enabled by default:
-
 - `aeron`: requires `cmake` and `clang`.
 
 ## Examples
@@ -65,16 +63,12 @@ use nbio::{Publish, PublishOutcome, Receive, ReceiveOutcome, Session};
 use nbio::tcp::TcpSession;
 
 // establish connection
-let mut client = TcpSession::connect("192.168.123.456:54321").unwrap();
-while client.status() == SessionStatus::Establishing {
-     client.drive().unwrap();
-}
+let mut client = TcpSession::connect("192.168.123.456:54321", None, None).unwrap();
 
 // publish some bytes until completion
 let mut pending_publish = "hello world!".as_bytes();
 while let PublishOutcome::Incomplete(pending) = client.publish(pending_publish).unwrap() {
     pending_publish = pending;
-    client.drive().unwrap();
 }
 
 // print received bytes
@@ -96,17 +90,13 @@ use nbio::tcp::TcpSession;
 use nbio::frame::{FrameDuplex, U64FrameDeserializer, U64FrameSerializer};
 
 // establish connection wrapped in a framing session
-let client = TcpSession::connect("192.168.123.456:54321").unwrap();
+let client = TcpSession::connect("192.168.123.456:54321", None, None).unwrap();
 let mut client = FrameDuplex::new(client, U64FrameDeserializer::new(), U64FrameSerializer::new(), 4096);
-while client.status() == SessionStatus::Establishing {
-     client.drive().unwrap();
-}
 
 // publish some bytes until completion
 let mut pending_publish = "hello world!".as_bytes();
 while let PublishOutcome::Incomplete(pending) = client.publish(pending_publish).unwrap() {
     pending_publish = pending;
-    client.drive().unwrap();
 }
 
 // print received bytes
@@ -136,9 +126,8 @@ let mut conn = client
     .request(Request::get("http://icanhazip.com").body(()).unwrap())
     .unwrap();
 
-// drive and read the conn until a full response is received
+// read the conn until a full response is received
 loop {
-    conn.drive().unwrap();
     if let ReceiveOutcome::Payload(r) = conn.receive().unwrap() {
         println!("Response Body: {}", String::from_utf8_lossy(r.body()));
         break;
@@ -158,7 +147,7 @@ use nbio::{Publish, PublishOutcome, Receive, Session, SessionStatus, ReceiveOutc
 use nbio::websocket::{Message, WebSocketSession};
 
 // connect and drive the handshake
-let mut session = WebSocketSession::connect("wss://echo.websocket.org/", None).unwrap();
+let mut session = WebSocketSession::connect("wss://echo.websocket.org/", None, None).unwrap();
 while session.status() == SessionStatus::Establishing {
      session.drive().unwrap();
 }
@@ -167,12 +156,10 @@ while session.status() == SessionStatus::Establishing {
 let mut pending_publish = Message::Text("hello world!".into());
 while let PublishOutcome::Incomplete(pending) = session.publish(pending_publish).unwrap() {
     pending_publish = pending;
-    session.drive().unwrap();
 }
 
-// drive and receive messages
+// receive messages
 loop {
-    session.drive().unwrap();
     if let ReceiveOutcome::Payload(r) = session.receive().unwrap() {
         println!("Received: {:?}", r);
         break;

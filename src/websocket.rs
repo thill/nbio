@@ -19,7 +19,7 @@ use tungstenite::{
 };
 
 use crate::{
-    dns::AddrResolverProvider,
+    dns::AddrResolver,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     http::Scheme,
     tcp::TcpSession,
@@ -47,7 +47,7 @@ impl WebSocketSession {
     /// To enable automatic pong responses, use [`WebSocketSession::with_automatic_pongs`]
     pub fn connect<I: IntoClientRequest>(
         request: I,
-        name_resolver_provider: Option<&dyn AddrResolverProvider>,
+        addr_resolver: Option<Arc<AddrResolver>>,
         tls_connector: Option<Arc<TlsConnector>>,
     ) -> Result<Self, Error> {
         let request = request
@@ -68,7 +68,7 @@ impl WebSocketSession {
             scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
-            name_resolver_provider,
+            addr_resolver,
             tls_connector,
         )?;
         Ok(Self {

@@ -121,7 +121,7 @@
 //! // create the client and make the request
 //! let mut client = HttpClient::new();
 //! let mut conn = client
-//!     .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
+//!     .request(Request::get("http://icanhazip.com").body(()).unwrap())
 //!     .unwrap();
 //!
 //! // read the conn until a full response is received

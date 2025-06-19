@@ -11,10 +11,7 @@ mod tests {
         // create the client and make the request
         let mut client = HttpClient::new();
         let mut conn = client
-            .request(
-                Request::get("https://www.google.com").body(()).unwrap(),
-                None,
-            )
+            .request(Request::get("https://www.google.com").body(()).unwrap())
             .unwrap();
 
         // receive the conn until a full response is received
@@ -34,7 +31,7 @@ mod tests {
         // create the client and make the request
         let mut client = HttpClient::new();
         let mut conn = client
-            .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
+            .request(Request::get("http://icanhazip.com").body(()).unwrap())
             .unwrap();
 
         // receive the conn until a full response is received
@@ -55,7 +52,7 @@ mod tests {
         // create the client and make the initial request
         let mut client = HttpClient::new();
         let mut conn = client
-            .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
+            .request(Request::get("http://icanhazip.com").body(()).unwrap())
             .unwrap();
 
         // receive the conn until the first full response is received

@@ -17,7 +17,7 @@ use tcp_stream::OwnedTLSConfig;
 
 use crate::{
     buffer::GrowableCircleBuf,
-    dns::AddrResolverProvider,
+    dns::AddrResolver,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
     tls::{NativeTlsConnector, TlsConnector},
@@ -83,7 +83,7 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 /// // create the client and make the request
 /// let mut client = HttpClient::new();
 /// let mut conn = client
-///     .request(Request::get("http://icanhazip.com").body(()).unwrap(), None)
+///     .request(Request::get("http://icanhazip.com").body(()).unwrap())
 ///     .unwrap();
 ///
 /// // drive and read the conn until a full response is received
@@ -98,16 +98,24 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 /// ```
 pub struct HttpClient {
     tls_connector: Option<Arc<TlsConnector>>,
+    addr_resolver: Option<Arc<AddrResolver>>,
 }
 impl HttpClient {
     /// Create a new HttpClient
     pub fn new() -> Self {
         Self {
             tls_connector: None,
+            addr_resolver: None,
         }
     }
 
-    /// Set the [`TlsConnector`] to use for a TLS handshakes.
+    /// Set the [`AddrResolver`] to use to resolve DNS entries
+    pub fn with_addr_resolver(mut self, addr_resolver: Arc<AddrResolver>) -> Self {
+        self.addr_resolver = Some(addr_resolver);
+        self
+    }
+
+    /// Set the [`TlsConnector`] to use for a TLS handshakes
     pub fn with_tls_connector(mut self, tls_connector: Arc<TlsConnector>) -> Self {
         self.tls_connector = Some(tls_connector);
         self
@@ -140,11 +148,10 @@ impl HttpClient {
         host: &str,
         port: u16,
         scheme: Scheme,
-        name_resolver_provider: Option<&dyn AddrResolverProvider>,
     ) -> Result<HttpClientSession, io::Error> {
         let mut conn = TcpSession::connect(
             format!("{host}:{port}"),
-            name_resolver_provider,
+            self.addr_resolver.as_ref().map(|x| Arc::clone(x)),
             self.tls_connector.as_ref().map(|x| Arc::clone(&x)),
         )?;
         if scheme == Scheme::Https {
@@ -170,7 +177,6 @@ impl HttpClient {
     pub fn request<I: IntoBody>(
         &mut self,
         request: hyperium_http::Request<I>,
-        name_resolver_provider: Option<&dyn AddrResolverProvider>,
     ) -> Result<HttpClientSession, io::Error> {
         let (parts, body) = request.into_parts();
         let request = hyperium_http::Request::from_parts(parts, body.into_body());
@@ -189,7 +195,7 @@ impl HttpClient {
             scheme,
             request.uri().host(),
             request.uri().port().map(|x| x.as_u16()),
-            name_resolver_provider,
+            self.addr_resolver.as_ref().map(|x| Arc::clone(x)),
             self.tls_connector.as_ref().map(|x| Arc::clone(&x)),
         )?;
         let mut conn = HttpClientSession::new(FrameDuplex::new(
@@ -213,7 +219,7 @@ pub(crate) fn connect_stream(
     scheme: Scheme,
     host: Option<&str>,
     port: Option<u16>,
-    name_resolver_provider: Option<&dyn AddrResolverProvider>,
+    addr_resolver: Option<Arc<AddrResolver>>,
     tls_connector: Option<Arc<TlsConnector>>,
 ) -> Result<TcpSession, Error> {
     let host = match host {
@@ -224,11 +230,7 @@ pub(crate) fn connect_stream(
         Some(x) => x,
         None => scheme.default_port(),
     };
-    let mut conn = TcpSession::connect(
-        format!("{host}:{port}"),
-        name_resolver_provider,
-        tls_connector,
-    )?;
+    let mut conn = TcpSession::connect(format!("{host}:{port}"), addr_resolver, tls_connector)?;
     if scheme == Scheme::Https {
         conn = conn
             .into_tls(&host)
