@@ -235,6 +235,17 @@ impl TcpSession {
             None => Err(Error::new(ErrorKind::NotConnected, "stream not connected")),
         }
     }
+
+    /// Extract the [`tcp_stream::TcpStream`] from the [`TcpSession`] if and only if it is in a connected state.
+    ///
+    /// Note: support for this conversion may be dropped or put behind a feature flag in a future release if we
+    /// move away from [`tcp_stream`] as our internal [`TcpStream`] impl.
+    pub fn into_tcp_stream(mut self) -> Option<tcp_stream::TcpStream> {
+        match self.connection.take() {
+            Some(TcpConnection::Connected(x)) => Some(x),
+            _ => None,
+        }
+    }
 }
 impl Session for TcpSession {
     fn status(&self) -> SessionStatus {
