@@ -101,7 +101,10 @@ impl TcpSession {
         let mut err = None;
         for addr in addrs {
             match mio::net::TcpStream::connect(addr) {
-                Ok(x) => stream = Some(x),
+                Ok(x) => {
+                    stream = Some(x);
+                    break;
+                }
                 Err(x) => err = Some(x),
             }
         }
