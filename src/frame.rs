@@ -106,7 +106,7 @@ where
 
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         let mut outcome = self.session.drive()?;
-        if self.write_buffer.is_empty() || self.session.status() != SessionStatus::Established {
+        if self.write_buffer.is_empty() {
             return Ok(outcome);
         }
         let write_buffer = self.write_buffer.peek_read();
@@ -283,7 +283,7 @@ where
 
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         let mut outcome = self.session.drive()?;
-        if self.write_buffer.is_empty() || self.session.status() != SessionStatus::Established {
+        if self.write_buffer.is_empty() {
             return Ok(outcome);
         }
         let write_buffer = self.write_buffer.peek_read();

@@ -11,9 +11,9 @@ use std::{
 use tcp_stream::TcpStream;
 
 use crate::{
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
     dns::{AddrResolver, AnyIntoAddr, IntoAddr, IntoAddrOutcome, ResolveAddr},
     tls::{IntoTls, IntoTlsOutcome, TlsConnector},
-    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
 /// Internal state machine of a TCP connection
@@ -164,12 +164,12 @@ impl TcpSession {
                 return Err(Error::new(
                     ErrorKind::NotConnected,
                     "stream already initialized for TLS",
-                ))
+                ));
             }
             Some(TcpConnection::Connecting(x)) => x,
             Some(TcpConnection::Connected(x)) => x,
             Some(TcpConnection::IntoTls(_)) => {
-                return Err(Error::new(ErrorKind::Other, "stream already mid-handshake"))
+                return Err(Error::new(ErrorKind::Other, "stream already mid-handshake"));
             }
             Some(TcpConnection::AddressResolution(x, _)) => {
                 self.connection =
@@ -517,13 +517,13 @@ impl From<TcpSession> for Option<tcp_stream::TcpStream> {
 #[cfg(unix)]
 unsafe fn into_tcpstream(stream: mio::net::TcpStream) -> TcpStream {
     use std::os::fd::{FromRawFd, IntoRawFd};
-    TcpStream::from_raw_fd(stream.into_raw_fd())
+    unsafe { TcpStream::from_raw_fd(stream.into_raw_fd()) }
 }
 
 #[cfg(windows)]
 unsafe fn into_tcpstream(stream: mio::net::TcpStream) -> TcpStream {
     use std::os::windows::io::{FromRawSocket, IntoRawSocket};
-    TcpStream::from_raw_socket(stream.into_raw_socket())
+    unsafe { TcpStream::from_raw_socket(stream.into_raw_socket()) }
 }
 
 /// A TcpServer, which produces connected, nonblocking [`TcpSession`] on calling `accept`.

@@ -445,8 +445,12 @@ impl Receive for PendingHttpResponse {
             return Ok(ReceiveOutcome::Idle);
         }
 
+        let drive_outcome = context.session.drive()?;
         if context.session.status() != SessionStatus::Established {
-            return Ok(ReceiveOutcome::Idle);
+            match drive_outcome {
+                DriveOutcome::Active => return Ok(ReceiveOutcome::Active),
+                DriveOutcome::Idle => return Ok(ReceiveOutcome::Idle),
+            }
         }
 
         // then try to send the request if necessary
