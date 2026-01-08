@@ -16,8 +16,8 @@ use std::{
 };
 
 use crate::{
-    buffer::GrowableCircleBuf, DriveOutcome, Flush, Publish, PublishOutcome, Receive,
-    ReceiveOutcome, Session, SessionStatus,
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
+    buffer::GrowableCircleBuf,
 };
 
 /// # FrameDuplex

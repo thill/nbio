@@ -10,18 +10,18 @@ use std::{
 };
 
 use hyperium_http::{
-    header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
     Response,
+    header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
 };
 use tcp_stream::OwnedTLSConfig;
 
 use crate::{
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
     buffer::GrowableCircleBuf,
     dns::AddrResolver,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
     tls::{NativeTlsConnector, TlsConnector},
-    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -188,7 +188,7 @@ impl HttpClient {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
                     "bad http uri scheme",
-                ))
+                ));
             }
         };
         let session = connect_stream(
@@ -445,6 +445,14 @@ impl Receive for PendingHttpResponse {
             return Ok(ReceiveOutcome::Idle);
         }
 
+        let drive_outcome = context.session.drive()?;
+        if context.session.status() == SessionStatus::Establishing {
+            match drive_outcome {
+                DriveOutcome::Active => return Ok(ReceiveOutcome::Active),
+                DriveOutcome::Idle => return Ok(ReceiveOutcome::Idle),
+            }
+        }
+
         // then try to send the request if necessary
         if let Some(request) = self.pending_request.take() {
             match context.session.publish(request)? {
@@ -692,7 +700,7 @@ impl SerializeFrame for Http1RequestSerializer {
                         return Err(Error::new(
                             ErrorKind::InvalidData,
                             format!("unsupported http request version {version:?}").as_str(),
-                        ))
+                        ));
                     }
                 }
 
@@ -790,7 +798,7 @@ fn parsed_into_response(
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     format!("response invalid version '{version}'").as_str(),
-                ))
+                ));
             }
         };
     }
