@@ -16,8 +16,8 @@ use std::{
 };
 
 use crate::{
-    buffer::GrowableCircleBuf, DriveOutcome, Flush, Publish, PublishOutcome, Receive,
-    ReceiveOutcome, Session, SessionStatus,
+    DriveOutcome, Flush, Publish, PublishOutcome, Receive, ReceiveOutcome, Session, SessionStatus,
+    buffer::GrowableCircleBuf,
 };
 
 /// # FrameDuplex
@@ -106,7 +106,7 @@ where
 
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         let mut outcome = self.session.drive()?;
-        if self.write_buffer.is_empty() {
+        if self.write_buffer.is_empty() || self.session.status() != SessionStatus::Established {
             return Ok(outcome);
         }
         let write_buffer = self.write_buffer.peek_read();
@@ -283,7 +283,7 @@ where
 
     fn drive(&mut self) -> Result<DriveOutcome, std::io::Error> {
         let mut outcome = self.session.drive()?;
-        if self.write_buffer.is_empty() {
+        if self.write_buffer.is_empty() || self.session.status() != SessionStatus::Established {
             return Ok(outcome);
         }
         let write_buffer = self.write_buffer.peek_read();
