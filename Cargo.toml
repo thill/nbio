@@ -1,6 +1,6 @@
 [package]
 name = "nbio"
-version = "0.21.6"
+version = "0.22.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Eric Thill"]
@@ -14,13 +14,14 @@ exclude = ["Cargo.lock"]
 default = ["crossbeam", "http", "mock", "mpsc", "tcp", "websocket"]
 aeron = ["dep:libaeron-sys"]
 crossbeam = ["dep:crossbeam-channel"]
-http = ["tcp", "dep:chunked_transfer", "dep:http", "dep:httparse"]
+http = ["tcp", "dep:chrono", "dep:chunked_transfer", "dep:http", "dep:httparse"]
 mock = []
 mpsc = []
 tcp = ["libc", "mio", "dep:tcp-stream"]
 websocket = ["http", "rand", "tcp", "dep:tungstenite"]
 
 [dependencies]
+chrono = { version = "0.4.43", optional = true }
 chunked_transfer = { version = "1.4.1", optional = true }
 circbuf = "0.2.1"
 crossbeam-channel = { version = "0.5.13", optional = true }

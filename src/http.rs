@@ -1,17 +1,20 @@
 //! A non-blocking HTTP client
 use std::{
     cell::RefCell,
+    collections::{HashMap, VecDeque},
     fmt::Debug,
     io::{self, Error, ErrorKind, Read},
     mem::swap,
     rc::Rc,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
+use chrono::{DateTime, Utc};
 use hyperium_http::{
     Response,
-    header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
+    header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
 };
 use tcp_stream::OwnedTLSConfig;
 
@@ -53,7 +56,7 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
     }
 }
 
-/// A simple non-blocking HTTP 1.x client
+/// A simple non-blocking HTTP 1.x client that does not attempt to reuse/keep-alive connections.
 ///
 /// Calling `connect(..)` or `request(..)` will return a [`HttpClientSession`], which encapsulates a [`FrameDuplex`] utilizing an HTTP [`FramingStrategy`].
 /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
@@ -99,14 +102,34 @@ impl<I: IntoBody> From<hyperium_http::Request<I>> for HttpRequest {
 pub struct HttpClient {
     tls_connector: Option<Arc<TlsConnector>>,
     addr_resolver: Option<Arc<AddrResolver>>,
+    pool: Option<Arc<HttpClientSessionPool>>,
 }
 impl HttpClient {
-    /// Create a new HttpClient
+    /// Create a new PersistentHttpClient
     pub fn new() -> Self {
         Self {
             tls_connector: None,
             addr_resolver: None,
+            pool: None,
         }
+    }
+
+    /// Enable keep-alive connection pooling
+    /// * `max_connections_per_domain` - max connections that can be pooled per scheme/host/port
+    /// * `max_connections_total` - max connections that can be pooled in total
+    /// * `default_keep_alive_timeout` - when the server does not response with the keep-alive header, use this as the default timeout
+    pub fn with_connection_pool(
+        mut self,
+        max_connections_per_domain: usize,
+        max_connections_total: usize,
+        default_keep_alive_timeout: Duration,
+    ) -> Self {
+        self.pool = Some(Arc::new(HttpClientSessionPool::new(
+            max_connections_per_domain,
+            max_connections_total,
+            default_keep_alive_timeout,
+        )));
+        self
     }
 
     /// Set the [`AddrResolver`] to use to resolve DNS entries
@@ -130,7 +153,7 @@ impl HttpClient {
         Ok(self)
     }
 
-    /// Initiate a new HTTP connection that is ready for a new request.
+    /// Get from the pool or initiate a new HTTP connection that is ready for a new request.
     ///
     /// This will return a [`HttpClientSession`], which encapsulates a [`FrameDuplex`] utilizing an HTTP [`FramingStrategy`].
     /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
@@ -144,11 +167,22 @@ impl HttpClient {
     ///
     /// For now, this only supports HTTP 1.x.
     pub fn connect(
-        &mut self,
+        &self,
         host: &str,
         port: u16,
         scheme: Scheme,
     ) -> Result<HttpClientSession, io::Error> {
+        // first check pool
+        if let Some(pool) = self.pool.as_ref() {
+            if let Some(conn) = pool.try_check_out(scheme, host.to_owned(), port) {
+                return Ok(HttpClientSession::new_with_pool(
+                    conn,
+                    Some((Arc::clone(&pool), (scheme, host.to_owned(), port))),
+                    true,
+                ));
+            }
+        }
+        // otherwise create new session
         let mut conn = TcpSession::connect(
             format!("{host}:{port}"),
             self.addr_resolver.as_ref().map(|x| Arc::clone(x)),
@@ -157,15 +191,21 @@ impl HttpClient {
         if scheme == Scheme::Https {
             conn = conn.into_tls(&host)?;
         }
-        Ok(HttpClientSession::new(FrameDuplex::new(
-            conn,
-            Http1ResponseDeserializer::new(),
-            Http1RequestSerializer::new(),
-            0,
-        )))
+        Ok(HttpClientSession::new_with_pool(
+            FrameDuplex::new(
+                conn,
+                Http1ResponseDeserializer::new(),
+                Http1RequestSerializer::new(),
+                0,
+            ),
+            self.pool
+                .as_ref()
+                .map(|pool| (Arc::clone(&pool), (scheme, host.to_owned(), port))),
+            false,
+        ))
     }
 
-    /// Initiate a new HTTP connection that will send the given request.
+    /// Get from the pool or initiate a new HTTP connection that will send the given request.
     ///
     /// This will return a [`HttpClientSession`], which encapsulates a [`FrameDuplex`] utilizing an HTTP [`FramingStrategy`].
     /// The framing strategy utilizes Hyperium's [`http`] lib for [`hyperium_http::Request`] and [`hyperium_http::Response`] structs.
@@ -175,7 +215,7 @@ impl HttpClient {
     ///
     /// For now, this only supports HTTP 1.x.
     pub fn request<I: IntoBody>(
-        &mut self,
+        &self,
         request: hyperium_http::Request<I>,
     ) -> Result<HttpClientSession, io::Error> {
         let (parts, body) = request.into_parts();
@@ -191,19 +231,18 @@ impl HttpClient {
                 ));
             }
         };
-        let session = connect_stream(
+        let mut conn = self.connect(
+            request.uri().host().unwrap_or_default(),
+            request
+                .uri()
+                .port()
+                .map(|x| x.as_u16())
+                .unwrap_or_else(|| match scheme {
+                    Scheme::Http => 80,
+                    Scheme::Https => 443,
+                }),
             scheme,
-            request.uri().host(),
-            request.uri().port().map(|x| x.as_u16()),
-            self.addr_resolver.as_ref().map(|x| Arc::clone(x)),
-            self.tls_connector.as_ref().map(|x| Arc::clone(&x)),
         )?;
-        let mut conn = HttpClientSession::new(FrameDuplex::new(
-            session,
-            Http1ResponseDeserializer::new(),
-            Http1RequestSerializer::new(),
-            0,
-        ));
         conn.pending_initial_request = Some(request.into());
 
         Ok(conn)
@@ -212,6 +251,179 @@ impl HttpClient {
 impl Default for HttpClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+struct HttpClientSessionPool {
+    // interior mutability. mutex is internal and will never panic, if somehow it does, the "try_*" functions simply will fail
+    context: Mutex<HttpClientSessionPoolContext>,
+}
+impl HttpClientSessionPool {
+    pub fn new(
+        max_connections_per_domain: usize,
+        max_connections_total: usize,
+        default_keep_alive_timeout: Duration,
+    ) -> Self {
+        Self {
+            context: Mutex::new(HttpClientSessionPoolContext::new(
+                max_connections_per_domain,
+                max_connections_total,
+                default_keep_alive_timeout,
+            )),
+        }
+    }
+
+    pub fn try_check_in(
+        &self,
+        scheme: Scheme,
+        host: String,
+        port: u16,
+        session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
+        response_connection_header_value: String,
+        response_keep_alive_header_value: Option<String>,
+    ) {
+        if let Ok(mut context) = self.context.lock() {
+            context.try_check_in(
+                scheme,
+                host,
+                port,
+                session,
+                response_connection_header_value,
+                response_keep_alive_header_value,
+            )
+        }
+    }
+
+    pub fn try_check_out(
+        &self,
+        scheme: Scheme,
+        host: String,
+        port: u16,
+    ) -> Option<FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>> {
+        let mut context = self.context.lock().ok()?;
+        context.try_check_out(scheme, host, port)
+    }
+}
+
+struct PoolEntry {
+    session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
+    expires: DateTime<Utc>,
+}
+
+struct HttpClientSessionPoolContext {
+    max_connections_per_domain: usize,
+    max_connections_total: usize,
+    default_keep_alive_timeout: Duration,
+    domain_sessions: HashMap<(Scheme, String, u16), VecDeque<PoolEntry>>,
+    cur_connections_total: usize,
+}
+impl HttpClientSessionPoolContext {
+    pub fn new(
+        max_connections_per_domain: usize,
+        max_connections_total: usize,
+        default_keep_alive_timeout: Duration,
+    ) -> Self {
+        Self {
+            max_connections_per_domain,
+            max_connections_total,
+            default_keep_alive_timeout,
+            domain_sessions: HashMap::new(),
+            cur_connections_total: 0,
+        }
+    }
+
+    pub fn try_check_in(
+        &mut self,
+        scheme: Scheme,
+        host: String,
+        port: u16,
+        session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
+        response_connection_header_value: String,
+        response_keep_alive_header_value: Option<String>,
+    ) {
+        // first cleanup soon-to-expire sessions
+        self.cleanup();
+        // then check if connection is keep-alive
+        if !response_connection_header_value.eq_ignore_ascii_case("Keep-Alive") {
+            return;
+        }
+        let mut keep_alive_timeout = self.default_keep_alive_timeout;
+        let mut keep_alive_max = None;
+        // then parse the optional keep-alive header
+        if let Some(response_keep_alive_header_value) = response_keep_alive_header_value {
+            for part in response_keep_alive_header_value
+                .split(",")
+                .map(|x| x.trim())
+            {
+                if let [key, value] = part
+                    .split("=")
+                    .map(|x| x.trim())
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    if key.eq_ignore_ascii_case("timeout") {
+                        if let Ok(value) = value.parse::<u64>() {
+                            keep_alive_timeout = Duration::from_secs(value)
+                        }
+                    } else if key.eq_ignore_ascii_case("max") {
+                        if let Ok(value) = value.parse::<u64>() {
+                            keep_alive_max = Some(value)
+                        }
+                    }
+                }
+            }
+        }
+
+        // then check that the connection is poolable
+        if keep_alive_max == Some(0) {
+            // no more reuse
+            return;
+        }
+        // 250ms buffer on expiry to avoid reusing an imminent stale connection
+        let expires = Utc::now() + keep_alive_timeout - Duration::from_millis(250);
+        // then check if pool is under thresholds
+        if self.cur_connections_total >= self.max_connections_total {
+            return;
+        }
+        let domain_sessions = self
+            .domain_sessions
+            .entry((scheme, host, port))
+            .or_default();
+        if domain_sessions.len() >= self.max_connections_per_domain {
+            return;
+        }
+        // then add to pool
+        self.cur_connections_total += 1;
+        domain_sessions.push_back(PoolEntry { session, expires });
+    }
+
+    pub fn try_check_out(
+        &mut self,
+        scheme: Scheme,
+        host: String,
+        port: u16,
+    ) -> Option<FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>> {
+        // first cleanup soon-to-expire sessions
+        self.cleanup();
+        // then lookup if any sessions are still available
+        let session = self
+            .domain_sessions
+            .get_mut(&(scheme, host, port))?
+            .pop_front()
+            .map(|x| x.session);
+        // then decrement global count if connection was taken
+        if session.is_some() {
+            self.cur_connections_total -= 1;
+        }
+        session
+    }
+
+    pub fn cleanup(&mut self) {
+        let now = Utc::now();
+        for (_, domain_sessions) in self.domain_sessions.iter_mut() {
+            domain_sessions.retain(|x| now < x.expires);
+        }
+        self.domain_sessions.retain(|_, x| !x.is_empty());
     }
 }
 
@@ -244,30 +456,86 @@ pub(crate) fn connect_stream(
 /// This encapsulates a [`FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>`] and allows a single
 /// [`hyperium_http::Request`] to be enqueued prior to a successful connection, supporting the [`HttpClient::request`] function.
 pub struct HttpClientSession {
-    session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
+    session: Option<FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>>,
     pending_initial_request: Option<HttpRequest>,
+    session_pool: Option<(Arc<HttpClientSessionPool>, (Scheme, String, u16))>,
+    response_connection_header_value: Option<String>,
+    response_keep_alive_header_value: Option<String>,
+    pooled: bool,
 }
 impl HttpClientSession {
     pub fn new(
         session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
     ) -> Self {
         Self {
-            session,
+            session: Some(session),
             pending_initial_request: None,
+            session_pool: None,
+            response_connection_header_value: None,
+            response_keep_alive_header_value: None,
+            pooled: false,
+        }
+    }
+
+    fn new_with_pool(
+        session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
+        session_pool: Option<(Arc<HttpClientSessionPool>, (Scheme, String, u16))>,
+        pooled: bool,
+    ) -> Self {
+        Self {
+            session: Some(session),
+            pending_initial_request: None,
+            session_pool,
+            response_connection_header_value: None,
+            response_keep_alive_header_value: None,
+            pooled,
+        }
+    }
+
+    /// Returns false if this was a newly established connection, of true if the connection was taken from the pool
+    pub fn is_pooled(&self) -> bool {
+        self.pooled
+    }
+}
+impl Drop for HttpClientSession {
+    fn drop(&mut self) {
+        if let (
+            Some(session),
+            Some((pool, (scheme, host, port))),
+            Some(response_connection_header_value),
+        ) = (
+            self.session.take(),
+            self.session_pool.take(),
+            self.response_connection_header_value.take(),
+        ) {
+            pool.try_check_in(
+                scheme,
+                host,
+                port,
+                session,
+                response_connection_header_value,
+                self.response_keep_alive_header_value.take(),
+            );
         }
     }
 }
 impl Session for HttpClientSession {
-    fn status(&self) -> crate::SessionStatus {
-        self.session.status()
+    fn status(&self) -> SessionStatus {
+        match self.session.as_ref() {
+            Some(x) => x.status(),
+            None => SessionStatus::Terminated,
+        }
     }
 
     fn drive(&mut self) -> Result<DriveOutcome, Error> {
-        let mut result: crate::DriveOutcome = self.session.drive()?;
-        if self.session.status() == SessionStatus::Established
-            && self.pending_initial_request.is_some()
+        let session = match self.session.as_mut() {
+            Some(x) => x,
+            None => return Err(Error::new(ErrorKind::NotConnected, "FrameDuplex closed")),
+        };
+        let mut result: crate::DriveOutcome = session.drive()?;
+        if session.status() == SessionStatus::Established && self.pending_initial_request.is_some()
         {
-            let wrote = match self.session.publish(
+            let wrote = match session.publish(
                 self.pending_initial_request
                     .take()
                     .expect("checked pending_request"),
@@ -294,7 +562,25 @@ impl Receive for HttpClientSession {
         if self.pending_initial_request.is_none() && self.status() == SessionStatus::Established {
             // make the request/response model more straightforward by not requiring checks to `status()` before calling `read`.
             // `self.pending_initial_request.is_none()`: only do this when an initial request is pending, otherwise revert to default `read` behavior for persistent streams.
-            self.session.receive()
+            let outcome = match self.session.as_mut() {
+                Some(x) => x.receive()?,
+                None => return Err(Error::new(ErrorKind::NotConnected, "FrameDuplex closed")),
+            };
+            // if pool is enabled, try to parse the keep-alive header
+            if self.session_pool.is_some() {
+                if let ReceiveOutcome::Payload(response) = &outcome {
+                    // connection/keep-alive headers
+                    self.response_connection_header_value = response
+                        .headers()
+                        .get(CONNECTION)
+                        .and_then(|x| Some(x.to_str().ok()?.to_owned()));
+                    self.response_keep_alive_header_value = response
+                        .headers()
+                        .get("Keep-Alive")
+                        .and_then(|x| Some(x.to_str().ok()?.to_owned()));
+                }
+            }
+            Ok(outcome)
         } else {
             Ok(crate::ReceiveOutcome::Idle)
         }
@@ -307,12 +593,27 @@ impl Publish for HttpClientSession {
         &mut self,
         data: Self::PublishPayload<'a>,
     ) -> Result<PublishOutcome<Self::PublishPayload<'a>>, Error> {
-        self.session.publish(data)
+        let mut data = data;
+        if self.session_pool.is_some() {
+            // try to set `connection: keep-alive` header if pooling is enabled
+            if let HttpRequest::Request(req) = &mut data {
+                if let Ok(value) = "Keep-Alive".parse() {
+                    req.headers_mut().insert(CONNECTION, value);
+                }
+            }
+        }
+        match self.session.as_mut() {
+            Some(x) => x.publish(data),
+            None => Err(Error::new(ErrorKind::NotConnected, "FrameDuplex closed")),
+        }
     }
 }
 impl Flush for HttpClientSession {
     fn flush(&mut self) -> Result<(), Error> {
-        self.session.flush()
+        match self.session.as_mut() {
+            Some(x) => x.flush(),
+            None => Err(Error::new(ErrorKind::NotConnected, "FrameDuplex closed")),
+        }
     }
 }
 impl Debug for HttpClientSession {
