@@ -281,16 +281,23 @@ impl<'a> TryFrom<Message<'a>> for Frame<'a> {
         })
     }
 }
-impl<'a> From<tungstenite::Message> for Message<'a> {
-    fn from(value: tungstenite::Message) -> Self {
+impl<'a> From<&'a tungstenite::Message> for Message<'a> {
+    /// Borrows the payload from the given message without copying it.
+    fn from(value: &'a tungstenite::Message) -> Self {
         match value {
-            tungstenite::Message::Text(x) => Message::Text(Cow::Owned(x.as_str().to_owned())),
-            tungstenite::Message::Binary(x) => Message::Binary(Cow::Owned(x.to_vec())),
-            tungstenite::Message::Ping(x) => Message::Ping(Cow::Owned(x.to_vec())),
-            tungstenite::Message::Pong(x) => Message::Pong(Cow::Owned(x.to_vec())),
-            tungstenite::Message::Close(x) => Message::Close(x.map(|x| x.into())),
+            tungstenite::Message::Text(x) => Message::Text(Cow::Borrowed(x.as_str())),
+            tungstenite::Message::Binary(x) => Message::Binary(Cow::Borrowed(&x[..])),
+            tungstenite::Message::Ping(x) => Message::Ping(Cow::Borrowed(&x[..])),
+            tungstenite::Message::Pong(x) => Message::Pong(Cow::Borrowed(&x[..])),
+            tungstenite::Message::Close(x) => Message::Close(x.as_ref().map(|x| x.into())),
             tungstenite::Message::Frame(_) => todo!(),
         }
+    }
+}
+impl<'a> From<tungstenite::Message> for Message<'a> {
+    /// Copies the payload out of the given message. Prefer converting from a reference to avoid the copy.
+    fn from(value: tungstenite::Message) -> Self {
+        Message::from(&value).into_owned()
     }
 }
 impl<'a> TryFrom<Frame<'a>> for Message<'a> {
@@ -325,12 +332,19 @@ impl<'a> CloseFrame<'a> {
         }
     }
 }
-impl<'a> From<tungstenite::protocol::CloseFrame> for CloseFrame<'a> {
-    fn from(value: tungstenite::protocol::CloseFrame) -> Self {
+impl<'a> From<&'a tungstenite::protocol::CloseFrame> for CloseFrame<'a> {
+    /// Borrows the reason from the given close frame without copying it.
+    fn from(value: &'a tungstenite::protocol::CloseFrame) -> Self {
         Self {
             code: value.code,
-            reason: Cow::Owned(value.reason.as_str().to_owned()),
+            reason: Cow::Borrowed(value.reason.as_str()),
         }
+    }
+}
+impl<'a> From<tungstenite::protocol::CloseFrame> for CloseFrame<'a> {
+    /// Copies the reason out of the given close frame. Prefer converting from a reference to avoid the copy.
+    fn from(value: tungstenite::protocol::CloseFrame) -> Self {
+        CloseFrame::from(&value).into_owned()
     }
 }
 
@@ -791,5 +805,37 @@ mod derived_from_tungstenite {
             }
             Ok(response)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converting_tungstenite_message_by_reference_borrows() {
+        let text = tungstenite::Message::Text("hello".into());
+        let binary = tungstenite::Message::Binary(vec![1, 2, 3].into());
+        let close = tungstenite::Message::Close(Some(tungstenite::protocol::CloseFrame {
+            code: CloseCode::Normal,
+            reason: "bye".into(),
+        }));
+
+        assert!(matches!(Message::from(&text), Message::Text(Cow::Borrowed("hello"))));
+        assert!(matches!(Message::from(&binary), Message::Binary(Cow::Borrowed(&[1, 2, 3]))));
+        match Message::from(&close) {
+            Message::Close(Some(frame)) => {
+                assert_eq!(frame.code, CloseCode::Normal);
+                assert!(matches!(frame.reason, Cow::Borrowed("bye")));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn converting_tungstenite_message_by_value_owns() {
+        let message: Message<'static> = tungstenite::Message::Text("hello".into()).into();
+        assert_eq!(message, Message::Text(Cow::Owned("hello".to_owned())));
+        assert!(matches!(message, Message::Text(Cow::Owned(_))));
     }
 }
