@@ -11,8 +11,12 @@ mod tests {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34001").unwrap();
         let mut client = TcpSession::connect("127.0.0.1:34001", None, None).unwrap();
-        client.drive().unwrap();
-        let session = server.accept().unwrap().unwrap().0;
+        let session = loop {
+            client.drive().unwrap();
+            if let Some((session, _)) = server.accept().unwrap() {
+                break session;
+            }
+        };
 
         let mut client = FrameDuplex::new(
             client,
@@ -68,8 +72,12 @@ mod tests {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34002").unwrap();
         let mut client = TcpSession::connect("127.0.0.1:34002", None, None).unwrap();
-        client.drive().unwrap();
-        let session = server.accept().unwrap().unwrap().0;
+        let session = loop {
+            client.drive().unwrap();
+            if let Some((session, _)) = server.accept().unwrap() {
+                break session;
+            }
+        };
 
         let mut client = FrameDuplex::new(
             client,
@@ -126,8 +134,12 @@ mod tests {
         // create server, connect client, establish server session
         let server = TcpServer::bind("127.0.0.1:34003").unwrap();
         let mut client = TcpSession::connect("127.0.0.1:34003", None, None).unwrap();
-        client.drive().unwrap();
-        let session = server.accept().unwrap().unwrap().0;
+        let session = loop {
+            client.drive().unwrap();
+            if let Some((session, _)) = server.accept().unwrap() {
+                break session;
+            }
+        };
 
         // use a small publish buffer to stress test
         let mut client = FrameDuplex::new(
@@ -150,10 +162,14 @@ mod tests {
             session.drive().unwrap();
         }
 
-        // send 100,000 messages with client while "slowly" receiveing with session
+        // send at least 100,000 messages with client while "slowly" receiveing with session,
+        // continuing until backpressure is encountered since socket buffer sizes vary by platform
         let mut received = Vec::new();
         let mut backpressure = false;
-        for i in 0..100000 {
+        let mut total = 0;
+        while total < 100000 || !backpressure {
+            let i = total;
+            total += 1;
             let m = format!("test test test test hello world {i:06}!");
             // send the message with the client while receiveing it with the server session
             let mut remaining = m.as_bytes();
@@ -173,8 +189,8 @@ mod tests {
         // assert backpressure and publish failures were tested
         assert!(backpressure);
 
-        // finish receiveing with session until all 100,000 messages were received while driving client to publish completion
-        while received.len() < 100000 {
+        // finish receiveing with session until all messages were received while driving client to publish completion
+        while received.len() < total {
             client.drive().unwrap();
             if let ReceiveOutcome::Payload(receive) = session.receive().unwrap() {
                 received.push(String::from_utf8_lossy(receive).to_string());
@@ -182,7 +198,7 @@ mod tests {
         }
 
         // validate the received messages
-        for i in 0..100000 {
+        for i in 0..total {
             assert_eq!(
                 received.get(i).expect(&format!("message idx {i}")),
                 &format!("test test test test hello world {i:06}!")
