@@ -5,40 +5,68 @@ use std::{
     net::Shutdown,
 };
 
+#[cfg(feature = "native-tls")]
 use native_tls::Certificate;
-use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TLSConfig, TcpStream};
+#[cfg(feature = "native-tls")]
+use tcp_stream::TLSConfig;
+use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TcpStream};
 
 pub enum TlsConnector {
+    #[cfg(feature = "native-tls")]
     Native(NativeTlsConnector),
+    #[cfg(feature = "rustls")]
     Rustls(RustlsConnector),
 }
 
 impl TlsConnector {
     pub fn start(&self, tcp_stream: TcpStream, domain: &str) -> Result<IntoTls, Error> {
         match self {
+            #[cfg(feature = "native-tls")]
             TlsConnector::Native(connector) => connector.start(tcp_stream, domain),
+            #[cfg(feature = "rustls")]
             TlsConnector::Rustls(connector) => connector.start(tcp_stream, domain),
+            #[cfg(not(any(feature = "native-tls", feature = "rustls")))]
+            _ => {
+                let _ = (tcp_stream, domain);
+                match *self {}
+            }
         }
     }
 
+    /// Create the default TLS connector, which uses rustls with the native certificate store.
+    ///
+    /// Returns [`ErrorKind::Unsupported`] when the `rustls` feature is not enabled.
     pub fn try_default() -> Result<Self, Error> {
-        Ok(TlsConnector::Rustls(RustlsConnector {
-            connector: tcp_stream::RustlsConnector::new_with_native_certs()?,
-        }))
+        #[cfg(feature = "rustls")]
+        {
+            Ok(TlsConnector::Rustls(RustlsConnector {
+                connector: tcp_stream::RustlsConnector::new_with_native_certs()?,
+            }))
+        }
+        #[cfg(not(feature = "rustls"))]
+        {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "no default TLS connector, enable the `rustls` feature or provide a TlsConnector",
+            ))
+        }
     }
 }
 
+#[cfg(feature = "native-tls")]
 /// Provides instances of [`IntoTls`] using native-tls
 pub struct NativeTlsConnector {
     connector: tcp_stream::NativeTlsConnector,
 }
 
+#[cfg(feature = "native-tls")]
 impl From<tcp_stream::NativeTlsConnector> for TlsConnector {
     fn from(connector: tcp_stream::NativeTlsConnector) -> Self {
         TlsConnector::Native(NativeTlsConnector { connector })
     }
 }
 
+#[cfg(feature = "native-tls")]
 impl NativeTlsConnector {
     pub fn new(
         config: TLSConfig<'_, '_, '_>,
@@ -102,17 +130,20 @@ impl NativeTlsConnector {
     }
 }
 
+#[cfg(feature = "rustls")]
 /// Provides instances of [`IntoTls`] using rustls
 pub struct RustlsConnector {
     connector: tcp_stream::RustlsConnector,
 }
 
+#[cfg(feature = "rustls")]
 impl From<tcp_stream::RustlsConnector> for TlsConnector {
     fn from(connector: tcp_stream::RustlsConnector) -> Self {
         TlsConnector::Rustls(RustlsConnector { connector })
     }
 }
 
+#[cfg(feature = "rustls")]
 impl RustlsConnector {
     pub fn new(use_native_certs: bool) -> Result<Self, Error> {
         let connector = if use_native_certs {
