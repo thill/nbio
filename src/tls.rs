@@ -14,6 +14,7 @@ use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TcpStream};
 pub enum TlsConnector {
     #[cfg(feature = "native-tls")]
     Native(NativeTlsConnector),
+    #[cfg(feature = "rustls")]
     Rustls(RustlsConnector),
 }
 
@@ -22,14 +23,33 @@ impl TlsConnector {
         match self {
             #[cfg(feature = "native-tls")]
             TlsConnector::Native(connector) => connector.start(tcp_stream, domain),
+            #[cfg(feature = "rustls")]
             TlsConnector::Rustls(connector) => connector.start(tcp_stream, domain),
+            #[cfg(not(any(feature = "native-tls", feature = "rustls")))]
+            _ => {
+                let _ = (tcp_stream, domain);
+                match *self {}
+            }
         }
     }
 
+    /// Create the default TLS connector, which uses rustls with the native certificate store.
+    ///
+    /// Returns [`ErrorKind::Unsupported`] when the `rustls` feature is not enabled.
     pub fn try_default() -> Result<Self, Error> {
-        Ok(TlsConnector::Rustls(RustlsConnector {
-            connector: tcp_stream::RustlsConnector::new_with_native_certs()?,
-        }))
+        #[cfg(feature = "rustls")]
+        {
+            Ok(TlsConnector::Rustls(RustlsConnector {
+                connector: tcp_stream::RustlsConnector::new_with_native_certs()?,
+            }))
+        }
+        #[cfg(not(feature = "rustls"))]
+        {
+            Err(Error::new(
+                ErrorKind::Unsupported,
+                "no default TLS connector, enable the `rustls` feature or provide a TlsConnector",
+            ))
+        }
     }
 }
 
@@ -110,17 +130,20 @@ impl NativeTlsConnector {
     }
 }
 
+#[cfg(feature = "rustls")]
 /// Provides instances of [`IntoTls`] using rustls
 pub struct RustlsConnector {
     connector: tcp_stream::RustlsConnector,
 }
 
+#[cfg(feature = "rustls")]
 impl From<tcp_stream::RustlsConnector> for TlsConnector {
     fn from(connector: tcp_stream::RustlsConnector) -> Self {
         TlsConnector::Rustls(RustlsConnector { connector })
     }
 }
 
+#[cfg(feature = "rustls")]
 impl RustlsConnector {
     pub fn new(use_native_certs: bool) -> Result<Self, Error> {
         let connector = if use_native_certs {
