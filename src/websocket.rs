@@ -284,10 +284,10 @@ impl<'a> TryFrom<Message<'a>> for Frame<'a> {
 impl<'a> From<tungstenite::Message> for Message<'a> {
     fn from(value: tungstenite::Message) -> Self {
         match value {
-            tungstenite::Message::Text(x) => Message::Text(Cow::Owned(x)),
-            tungstenite::Message::Binary(x) => Message::Binary(Cow::Owned(x)),
-            tungstenite::Message::Ping(x) => Message::Ping(Cow::Owned(x)),
-            tungstenite::Message::Pong(x) => Message::Pong(Cow::Owned(x)),
+            tungstenite::Message::Text(x) => Message::Text(Cow::Owned(x.as_str().to_owned())),
+            tungstenite::Message::Binary(x) => Message::Binary(Cow::Owned(x.to_vec())),
+            tungstenite::Message::Ping(x) => Message::Ping(Cow::Owned(x.to_vec())),
+            tungstenite::Message::Pong(x) => Message::Pong(Cow::Owned(x.to_vec())),
             tungstenite::Message::Close(x) => Message::Close(x.map(|x| x.into())),
             tungstenite::Message::Frame(_) => todo!(),
         }
@@ -325,11 +325,11 @@ impl<'a> CloseFrame<'a> {
         }
     }
 }
-impl<'a> From<tungstenite::protocol::CloseFrame<'a>> for CloseFrame<'a> {
-    fn from(value: tungstenite::protocol::CloseFrame<'a>) -> Self {
+impl<'a> From<tungstenite::protocol::CloseFrame> for CloseFrame<'a> {
+    fn from(value: tungstenite::protocol::CloseFrame) -> Self {
         Self {
             code: value.code,
-            reason: value.reason,
+            reason: Cow::Owned(value.reason.as_str().to_owned()),
         }
     }
 }
@@ -757,7 +757,7 @@ mod derived_from_tungstenite {
 
         fn verify_response(accept_key: &str, response: Response) -> Result<Response, Error> {
             if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-                return Err(Error::Http(response));
+                return Err(Error::Http(Box::new(response)));
             }
             let headers = response.headers();
             if !headers
