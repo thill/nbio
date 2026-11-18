@@ -8,10 +8,9 @@ use std::{
     rc::Rc,
     str::FromStr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
 use hyperium_http::{
     Response,
     header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
@@ -305,9 +304,13 @@ impl HttpClientSessionPool {
     }
 }
 
+/// Upper bound on a server-supplied `Keep-Alive: timeout=N`, so a bad header cannot pin a socket
+/// in the pool indefinitely.
+const MAX_SERVER_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
 struct PoolEntry {
     session: FrameDuplex<TcpSession, Http1ResponseDeserializer, Http1RequestSerializer>,
-    expires: DateTime<Utc>,
+    expires: Instant,
 }
 
 struct HttpClientSessionPoolContext {
@@ -363,7 +366,8 @@ impl HttpClientSessionPoolContext {
                 {
                     if key.eq_ignore_ascii_case("timeout") {
                         if let Ok(value) = value.parse::<u64>() {
-                            keep_alive_timeout = Duration::from_secs(value)
+                            keep_alive_timeout =
+                                Duration::from_secs(value).min(MAX_SERVER_KEEP_ALIVE_TIMEOUT)
                         }
                     } else if key.eq_ignore_ascii_case("max") {
                         if let Ok(value) = value.parse::<u64>() {
@@ -380,7 +384,11 @@ impl HttpClientSessionPoolContext {
             return;
         }
         // 250ms buffer on expiry to avoid reusing an imminent stale connection
-        let expires = Utc::now() + keep_alive_timeout - Duration::from_millis(250);
+        let Some(expires) =
+            Instant::now().checked_add(keep_alive_timeout.saturating_sub(Duration::from_millis(250)))
+        else {
+            return;
+        };
         // then check if pool is under thresholds
         if self.cur_connections_total >= self.max_connections_total {
             return;
@@ -419,7 +427,7 @@ impl HttpClientSessionPoolContext {
     }
 
     pub fn cleanup(&mut self) {
-        let now = Utc::now();
+        let now = Instant::now();
         for (_, domain_sessions) in self.domain_sessions.iter_mut() {
             domain_sessions.retain(|x| now < x.expires);
         }
