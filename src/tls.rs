@@ -118,7 +118,7 @@ impl RustlsConnector {
         let connector = if use_native_certs {
             tcp_stream::RustlsConnector::new_with_native_certs()?
         } else {
-            tcp_stream::RustlsConnector::default()
+            tcp_stream::RustlsConnectorConfig::default().connector_with_no_client_auth()?
         };
         Ok(Self { connector })
     }
