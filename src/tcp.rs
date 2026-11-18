@@ -62,13 +62,13 @@ impl TcpSession {
     /// let session = TcpSession::new(my_stream);
     /// ````
     pub fn new<I: Into<TcpStream>>(stream: I) -> Result<Self, Error> {
-        let stream = stream.into();
+        let mut stream = stream.into();
         stream.set_nonblocking(true)?;
         stream.set_nodelay(true)?;
         let mut read_buffer = Vec::new();
         read_buffer.resize(4096, 0);
         Ok(Self {
-            connection: if stream.is_connected() {
+            connection: if stream.try_connect()? {
                 Some(TcpConnection::Connected(stream))
             } else {
                 Some(TcpConnection::Connecting(stream))
@@ -575,7 +575,7 @@ impl TcpServer {
             },
         };
         Ok(Some((
-            TcpSession::new(TcpStream::Plain(stream, true))?,
+            TcpSession::new(TcpStream::Plain(stream))?,
             addr,
         )))
     }
