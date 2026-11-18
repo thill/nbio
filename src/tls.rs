@@ -5,10 +5,14 @@ use std::{
     net::Shutdown,
 };
 
+#[cfg(feature = "native-tls")]
 use native_tls::Certificate;
-use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TLSConfig, TcpStream};
+#[cfg(feature = "native-tls")]
+use tcp_stream::TLSConfig;
+use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TcpStream};
 
 pub enum TlsConnector {
+    #[cfg(feature = "native-tls")]
     Native(NativeTlsConnector),
     Rustls(RustlsConnector),
 }
@@ -16,6 +20,7 @@ pub enum TlsConnector {
 impl TlsConnector {
     pub fn start(&self, tcp_stream: TcpStream, domain: &str) -> Result<IntoTls, Error> {
         match self {
+            #[cfg(feature = "native-tls")]
             TlsConnector::Native(connector) => connector.start(tcp_stream, domain),
             TlsConnector::Rustls(connector) => connector.start(tcp_stream, domain),
         }
@@ -28,17 +33,20 @@ impl TlsConnector {
     }
 }
 
+#[cfg(feature = "native-tls")]
 /// Provides instances of [`IntoTls`] using native-tls
 pub struct NativeTlsConnector {
     connector: tcp_stream::NativeTlsConnector,
 }
 
+#[cfg(feature = "native-tls")]
 impl From<tcp_stream::NativeTlsConnector> for TlsConnector {
     fn from(connector: tcp_stream::NativeTlsConnector) -> Self {
         TlsConnector::Native(NativeTlsConnector { connector })
     }
 }
 
+#[cfg(feature = "native-tls")]
 impl NativeTlsConnector {
     pub fn new(
         config: TLSConfig<'_, '_, '_>,

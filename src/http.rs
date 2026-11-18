@@ -15,6 +15,7 @@ use hyperium_http::{
     Response,
     header::{CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
 };
+#[cfg(feature = "native-tls")]
 use tcp_stream::OwnedTLSConfig;
 
 use crate::{
@@ -23,7 +24,7 @@ use crate::{
     dns::AddrResolver,
     frame::{DeserializeFrame, FrameDuplex, SerializeFrame, SizedFrame},
     tcp::TcpSession,
-    tls::{NativeTlsConnector, TlsConnector},
+    tls::TlsConnector,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -144,8 +145,9 @@ impl HttpClient {
     }
 
     /// Create a native TLS connector with the given config
+    #[cfg(feature = "native-tls")]
     pub fn with_tls_config(mut self, tls_config: OwnedTLSConfig) -> Result<Self, Error> {
-        self.tls_connector = Some(Arc::new(TlsConnector::Native(NativeTlsConnector::new(
+        self.tls_connector = Some(Arc::new(TlsConnector::Native(crate::tls::NativeTlsConnector::new(
             tls_config.as_ref(),
             false,
         )?)));

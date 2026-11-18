@@ -11,12 +11,13 @@ categories = ["concurrency", "rust-patterns"]
 exclude = ["Cargo.lock"]
 
 [features]
-default = ["crossbeam", "http", "mock", "mpsc", "tcp", "websocket"]
+default = ["crossbeam", "http", "mock", "mpsc", "native-tls", "tcp", "websocket"]
 aeron = ["dep:libaeron-sys"]
 crossbeam = ["dep:crossbeam-channel"]
 http = ["tcp", "dep:chunked_transfer", "dep:http", "dep:httparse"]
 mock = []
 mpsc = []
+native-tls = ["tcp", "dep:native-tls", "dep:rustls-pemfile", "tcp-stream/native-tls"]
 tcp = ["libc", "mio", "dep:tcp-stream"]
 websocket = ["http", "rand", "tcp", "dep:tungstenite"]
 
@@ -27,10 +28,10 @@ crossbeam-channel = { version = "0.5.17", optional = true }
 http = { version = "1.5.0", optional = true }
 libc = { version = "0.2.191", optional = true }
 mio = { version = "1.2.5", features = ["net", "os-poll"], optional = true }
-native-tls = "0.2.18"
-rustls-pemfile = "2.2.0"
+native-tls = { version = "0.2.18", optional = true }
+rustls-pemfile = { version = "2.2.0", optional = true }
 httparse = { version = "1.10.1", optional = true }
 libaeron-sys = { version = "1.54.2", optional = true }
 rand = { version = "0.10.4", optional = true }
-tcp-stream = { version = "0.34.17", optional = true, default-features = false, features = ["native-tls", "rustls--aws_lc_rs", "rustls-native-certs"]  }
+tcp-stream = { version = "0.34.17", optional = true, default-features = false, features = ["rustls--aws_lc_rs", "rustls-native-certs"]  }
 tungstenite = { version = "0.30.0", optional = true }
