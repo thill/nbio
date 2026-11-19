@@ -8,6 +8,8 @@ use std::{
 #[cfg(feature = "native-tls")]
 use native_tls::Certificate;
 #[cfg(feature = "native-tls")]
+use rustls_pki_types::{pem::PemObject, CertificateDer};
+#[cfg(feature = "native-tls")]
 use tcp_stream::TLSConfig;
 use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TcpStream};
 
@@ -91,20 +93,12 @@ impl NativeTlsConnector {
         }
 
         if let Some(cert_chain) = config.cert_chain {
-            let mut cert_chain = std::io::BufReader::new(cert_chain.as_bytes());
-            for cert in rustls_pemfile::read_all(&mut cert_chain) {
-                match cert {
-                    Ok(rustls_pemfile::Item::X509Certificate(cert)) => {
-                        builder.add_root_certificate(
-                            Certificate::from_der(&cert[..])
-                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Err(Error::new(ErrorKind::Other, e));
-                    }
-                }
+            for cert in CertificateDer::pem_slice_iter(cert_chain.as_bytes()) {
+                let cert = cert.map_err(|e| Error::new(ErrorKind::Other, e))?;
+                builder.add_root_certificate(
+                    Certificate::from_der(&cert)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                );
             }
         }
 
@@ -217,4 +211,50 @@ impl Drop for IntoTls {
 enum IntoTlsState {
     MidHandshake(MidHandshakeTlsStream),
     Finished(TcpStream),
+}
+
+#[cfg(all(test, feature = "native-tls"))]
+mod tests {
+    use super::*;
+
+    const CERT: &str = "\
+";
+
+    fn connector(cert_chain: &str) -> Result<NativeTlsConnector, Error> {
+        NativeTlsConnector::new(
+            TLSConfig {
+                cert_chain: Some(cert_chain),
+                ..Default::default()
+            },
+            false,
+        )
+    }
+
+    #[test]
+    fn native_connector_accepts_pem_cert_chain() {
+        assert!(connector(CERT).is_ok());
+    }
+
+    #[test]
+    fn native_connector_accepts_multiple_certs_and_ignores_other_items() {
+        let key = "-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----\n";
+        assert!(connector(&format!("{key}{CERT}{CERT}")).is_ok());
+    }
+
+    #[test]
+    fn native_connector_accepts_chain_without_certs() {
+        assert!(connector("").is_ok());
+    }
+
+    #[test]
+    fn native_connector_rejects_malformed_pem() {
+        let bad = "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
+        assert!(connector(bad).is_err());
+    }
+
+    #[test]
+    fn native_connector_rejects_invalid_der() {
+        let bad = "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n";
+        assert!(connector(bad).is_err());
+    }
 }
