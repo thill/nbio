@@ -8,6 +8,8 @@ use std::{
 #[cfg(feature = "native-tls")]
 use native_tls::Certificate;
 #[cfg(feature = "native-tls")]
+use rustls_pki_types::{pem::PemObject, CertificateDer};
+#[cfg(feature = "native-tls")]
 use tcp_stream::TLSConfig;
 use tcp_stream::{HandshakeError, MidHandshakeTlsStream, TcpStream};
 
@@ -91,20 +93,12 @@ impl NativeTlsConnector {
         }
 
         if let Some(cert_chain) = config.cert_chain {
-            let mut cert_chain = std::io::BufReader::new(cert_chain.as_bytes());
-            for cert in rustls_pemfile::read_all(&mut cert_chain) {
-                match cert {
-                    Ok(rustls_pemfile::Item::X509Certificate(cert)) => {
-                        builder.add_root_certificate(
-                            Certificate::from_der(&cert[..])
-                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Err(Error::new(ErrorKind::Other, e));
-                    }
-                }
+            for cert in CertificateDer::pem_slice_iter(cert_chain.as_bytes()) {
+                let cert = cert.map_err(|e| Error::new(ErrorKind::Other, e))?;
+                builder.add_root_certificate(
+                    Certificate::from_der(&cert)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                );
             }
         }
 
