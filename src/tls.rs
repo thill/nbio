@@ -212,3 +212,49 @@ enum IntoTlsState {
     MidHandshake(MidHandshakeTlsStream),
     Finished(TcpStream),
 }
+
+#[cfg(all(test, feature = "native-tls"))]
+mod tests {
+    use super::*;
+
+    const CERT: &str = "\
+";
+
+    fn connector(cert_chain: &str) -> Result<NativeTlsConnector, Error> {
+        NativeTlsConnector::new(
+            TLSConfig {
+                cert_chain: Some(cert_chain),
+                ..Default::default()
+            },
+            false,
+        )
+    }
+
+    #[test]
+    fn native_connector_accepts_pem_cert_chain() {
+        assert!(connector(CERT).is_ok());
+    }
+
+    #[test]
+    fn native_connector_accepts_multiple_certs_and_ignores_other_items() {
+        let key = "-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----\n";
+        assert!(connector(&format!("{key}{CERT}{CERT}")).is_ok());
+    }
+
+    #[test]
+    fn native_connector_accepts_chain_without_certs() {
+        assert!(connector("").is_ok());
+    }
+
+    #[test]
+    fn native_connector_rejects_malformed_pem() {
+        let bad = "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
+        assert!(connector(bad).is_err());
+    }
+
+    #[test]
+    fn native_connector_rejects_invalid_der() {
+        let bad = "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n";
+        assert!(connector(bad).is_err());
+    }
+}
